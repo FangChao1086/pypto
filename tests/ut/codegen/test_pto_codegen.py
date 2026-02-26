@@ -33,6 +33,8 @@ from pypto.ir.pto_codegen import (
     generate,
 )
 
+from pypto.language.typing.tiling import Array
+
 PTOCodegen = codegen.PTOCodegen
 
 # Dynamic shape variables for wrapper dispatch tests
@@ -160,6 +162,43 @@ def test_pto_codegen_basic_mlir_structure():
     assert "func.func @test_func" in mlir_code
     assert "return" in mlir_code
     assert "}" in mlir_code
+
+def test_pto_codegen_tiling():
+    """Test that PTOCodegen generates correct Tiling."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    class Tiling:
+        n: int
+        m: int
+        arr: Array[float, 3]
+    @pl.program
+    class TilingProgram:
+        @pl.function
+        def test_func(self,
+            x: pl.Tensor[[64, 64], pl.FP32],
+            y: pl.Tensor[[64, 64], pl.FP32],
+            tiling: Tiling,
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            n = tiling.n
+            m = tiling.m
+            tmp0 = tiling.arr[0]
+            tmp1 = tiling.arr[1]
+            # current ptoas CodeGen not support dynamic offsets and shapes
+            result0 = n + m
+            result1 = tmp0 * tmp1
+            return x
+
+    # Compile with PTOAS strategy (applies necessary passes + codegen)
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(TilingProgram)
+
+    # Generate MLIR
+    codegen = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
+    assert("%arg2: i32, %arg3: i32, %arg4: f32, %arg5: f32, %arg6: f32" in mlir_code)
+    assert("arith.addi %arg2, %arg3 : index" in mlir_code)
+    assert("arith.mulf %arg4, %arg5 : f32" in mlir_code)
 
 
 def test_pto_codegen_tensor_parameters():

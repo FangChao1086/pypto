@@ -226,6 +226,7 @@ class TestTilingParameter:
         class Tiling:
             n: int
             m: int
+            arr: Array[float, 3]
 
         @pl.function
         def kernel(
@@ -233,11 +234,16 @@ class TestTilingParameter:
             y: pl.Tensor[[64], pl.FP32],
             tiling: Tiling,
         ) -> pl.Tensor[[64], pl.FP32]:
+            n = tiling.n
+            m = tiling.m
+            tmp1 = tiling.arr[1]
             return x
 
+        print(kernel)
+
         assert isinstance(kernel, ir.Function)
-        # 2 tensor params + 2 tiling fields = 4 total
-        assert len(kernel.params) == 4
+        # 2 tensor params + 5 tiling fields = 7 total
+        assert len(kernel.params) == 7
         param_names = [p.name for p in kernel.params]
         assert param_names[0] == "x"
         assert param_names[1] == "y"
