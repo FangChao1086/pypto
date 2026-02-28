@@ -43,11 +43,11 @@ def load_kernel(
     a: pl.Tensor[[64, 128], pl.FP16],
     b: pl.Tensor[[64, 128], pl.FP16],
 ) -> pl.Tensor[[64, 128], pl.FP16]:
-    tile_a = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.UB,
+    tile_a = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x0000, size=16384)
     plm.load(a, [0, 0], [64, 128], out=tile_a)
 
-    tile_b = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.UB,
+    tile_b = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x4000, size=16384)
     plm.load(b, [0, 0], [64, 128], out=tile_b)
     return b
@@ -59,15 +59,15 @@ def add_kernel(
     a: pl.Tensor[[64, 128], pl.FP16],
     b: pl.Tensor[[64, 128], pl.FP16],
 ) -> pl.Tensor[[64, 128], pl.FP16]:
-    tile_a = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.UB,
+    tile_a = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x0000, size=16384)
     plm.load(a, [0, 0], [64, 128], out=tile_a)
 
-    tile_b = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.UB,
+    tile_b = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x4000, size=16384)
     plm.load(b, [0, 0], [64, 128], out=tile_b)
 
-    tile_c = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.UB,
+    tile_c = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x8000, size=16384)
     plm.add(tile_a, tile_b, out=tile_c)
     return b
@@ -79,15 +79,15 @@ def mul_kernel(
     a: pl.Tensor[[64, 128], pl.FP16],
     b: pl.Tensor[[64, 128], pl.FP16],
 ) -> pl.Tensor[[64, 128], pl.FP16]:
-    tile_a = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.UB,
+    tile_a = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x0000, size=16384)
     plm.load(a, [0, 0], [64, 128], out=tile_a)
 
-    tile_b = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.UB,
+    tile_b = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x4000, size=16384)
     plm.load(b, [0, 0], [64, 128], out=tile_b)
 
-    tile_c = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.UB,
+    tile_c = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x8000, size=16384)
     plm.mul(tile_a, tile_b, out=tile_c)
     return b
@@ -98,11 +98,11 @@ def mul_kernel(
 def neg_kernel(
     a: pl.Tensor[[64, 128], pl.FP16],
 ) -> pl.Tensor[[64, 128], pl.FP16]:
-    tile_a = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.UB,
+    tile_a = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x0000, size=16384)
     plm.load(a, [0, 0], [64, 128], out=tile_a)
 
-    tile_b = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.UB,
+    tile_b = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x4000, size=16384)
     plm.neg(tile_a, out=tile_b)
     return a

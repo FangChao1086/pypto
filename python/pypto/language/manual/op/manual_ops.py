@@ -65,7 +65,7 @@ def _op(name: str, ins: list, out: Tile, **kwargs) -> None:
 def create_tile(
     shape: list[int],
     dtype: DataType,
-    target_memory: MemorySpace = MemorySpace.UB,
+    target_memory: MemorySpace = MemorySpace.Vec,
     addr: Optional[Union[int, Expr]] = None,
     size: Optional[int] = None,
 ) -> Tile:

@@ -288,7 +288,7 @@ TypePtr DeduceBlockCreateTileType(const std::vector<ExprPtr>& args,
   // This allows the PTO codegen to emit pto.alloc_tile with base_addr directly from the IR,
   // without requiring the init_memref pass.
   MemorySpace target_memory =
-      GetKwarg<MemorySpace>(kwargs, "target_memory", std::optional<MemorySpace>(MemorySpace::UB));
+      GetKwarg<MemorySpace>(kwargs, "target_memory", std::optional<MemorySpace>(MemorySpace::Vec));
 
   bool has_memref = false;
   for (const auto& [k, v] : kwargs) {
