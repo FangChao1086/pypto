@@ -65,7 +65,7 @@ def test_add():
     z = torch.empty(shape, device=device, dtype=dtype)
 
     compiled_lib = fe.compile(add_kernel)
-    print("compiled lib path:", compiled_lib)
+    print("compiled lib path:", compiled_lib.lib_path)
     fe.launch(None, 1, compiled_lib, x, y, z)
 
     torch.npu.synchronize()

@@ -234,8 +234,8 @@ static std::string MakeManualLoadCodegenPTO(const CallPtr& op, codegen::CodegenB
   auto out_tile = As<Var>(op->args_[3]);
   INTERNAL_CHECK(out_tile) << "manual.load: fourth argument (out) must be a Var";
 
-  int64_t row_off = codegen.GetConstIntValue(offsets_tuple->elements_[0]);
-  int64_t col_off = codegen.GetConstIntValue(offsets_tuple->elements_[1]);
+  auto row_off = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
+  auto col_off = codegen.GetExprAsCode(offsets_tuple->elements_[1]);
   int64_t height  = codegen.GetConstIntValue(shapes_tuple->elements_[0]);
   int64_t width   = codegen.GetConstIntValue(shapes_tuple->elements_[1]);
 
@@ -262,8 +262,7 @@ static std::string MakeManualLoadCodegenPTO(const CallPtr& op, codegen::CodegenB
   std::string partition_view = codegen.NewTemp();
   std::ostringstream pv_line;
   pv_line << partition_view << " = pto.partition_view " << tensor_view
-          << ", offsets = [" << codegen.GetIndexConstant(row_off) << ", "
-          << codegen.GetIndexConstant(col_off) << "]"
+          << ", offsets = [" << row_off << ", " << col_off << "]"
           << ", sizes = ["   << codegen.GetIndexConstant(height)  << ", "
           << codegen.GetIndexConstant(width) << "]"
           << " : " << tensor_view_type << " -> " << partition_type;
