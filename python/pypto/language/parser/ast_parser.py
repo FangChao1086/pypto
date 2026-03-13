@@ -17,6 +17,14 @@ from pypto.ir import op as ir_op
 from pypto.pypto_core import DataType, ir
 from pypto.pypto_core.ir import MemorySpace
 
+_MEMORY_SPACE_MAP: dict[str, MemorySpace] = {
+    "Left": MemorySpace.Left,
+    "Right": MemorySpace.Right,
+    "Vec": MemorySpace.Vec,
+    "Mat": MemorySpace.Mat,
+    "Acc": MemorySpace.Acc,
+}
+
 from .diagnostics import (
     InvalidOperationError,
     ParserSyntaxError,
@@ -2341,16 +2349,8 @@ class ASTParser:
                     hint=f"Valid fields are: {', '.join(field_vars.keys())}",
                 )
             # Check for pl.MemorySpace.* attribute access (nested: pl.MemorySpace.Left)
-            if obj_name == "pl" and field_name in ("Left", "Right", "Vec", "Mat", "Acc", "Bias"):
-                memory_space_map = {
-                    "Left": MemorySpace.Left,
-                    "Right": MemorySpace.Right,
-                    "Vec": MemorySpace.Vec,
-                    "Mat": MemorySpace.Mat,
-                    "Acc": MemorySpace.Acc,
-                }
-                if field_name in memory_space_map:
-                    return ir.ConstInt(memory_space_map[field_name].value, DataType.INT64, span)
+            if obj_name == "pl" and field_name in _MEMORY_SPACE_MAP:
+                return ir.ConstInt(_MEMORY_SPACE_MAP[field_name].value, DataType.INT64, span)
         # Check for nested attribute access like pl.MemorySpace.Left
         if isinstance(attr.value, ast.Attribute):
             inner_attr = attr.value
@@ -2360,15 +2360,8 @@ class ASTParser:
                 outer_field_name = attr.attr
                 # Handle pl.MemorySpace.Left, pl.MemorySpace.Right, etc.
                 if inner_obj_name == "pl" and inner_field_name == "MemorySpace":
-                    memory_space_map = {
-                        "Left": MemorySpace.Left,
-                        "Right": MemorySpace.Right,
-                        "Vec": MemorySpace.Vec,
-                        "Mat": MemorySpace.Mat,
-                        "Acc": MemorySpace.Acc,
-                    }
-                    if outer_field_name in memory_space_map:
-                        return ir.ConstInt(memory_space_map[outer_field_name].value, DataType.INT64, span)
+                    if outer_field_name in _MEMORY_SPACE_MAP:
+                        return ir.ConstInt(_MEMORY_SPACE_MAP[outer_field_name].value, DataType.INT64, span)
         raise UnsupportedFeatureError(
             f"Standalone attribute access not supported: {ast.unparse(attr)}",
             span=span,

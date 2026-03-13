@@ -10,11 +10,12 @@
 """Tiling class utilities for PyPTO Language DSL."""
 
 from dataclasses import dataclass
+from dataclasses import is_dataclass
 
 from pypto.pypto_core import DataType
 
 _PYTHON_TYPE_TO_DTYPE: dict[type, DataType] = {
-    int: DataType.INT32,
+    int: DataType.INDEX,
     float: DataType.FP32,
     bool: DataType.BOOL,
 }
@@ -70,7 +71,7 @@ def _is_valid_field_annotation(ann: object) -> bool:
 def is_tiling_class(cls: object) -> bool:
     """Return True if cls is a user-defined tiling class.
 
-    A tiling class is a plain Python class with at least one field,
+    A tiling class is a dataclass with at least one field,
     all annotated as int, float, bool, or Array[T, N].
 
     Args:
@@ -80,6 +81,8 @@ def is_tiling_class(cls: object) -> bool:
         True if cls is a valid tiling class
     """
     if not isinstance(cls, type):
+        return False
+    if not is_dataclass(cls):
         return False
     annotations = getattr(cls, "__annotations__", {})
     if not annotations:

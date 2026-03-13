@@ -508,11 +508,9 @@ std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string)
 
 void PTOCodegen::SetCurrentResultBuf(const std::string& buf) { current_result_buf_ = buf; }
 
-int64_t extra_tile_addr = 0x10000;
 void PTOCodegen::EmitExtraAllocTiles() {
   for (const auto& [name, type_str] : extra_alloc_tiles_) {
     stream_ << GetIndent() << name << " = pto.alloc_tile addr = " << GetOrEmitI64Constant(0) << " : " << type_str << "\n";
-    extra_tile_addr += 16384;  // Increment by typical tile size
   }
 }
 

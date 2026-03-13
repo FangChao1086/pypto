@@ -9,6 +9,8 @@
 
 """Unit tests for tiling parameter support in the PyPTO language DSL."""
 
+from dataclasses import dataclass
+
 import pypto.language as pl
 import pytest
 from pypto import ir
@@ -32,6 +34,7 @@ class TestTilingUtilities:
     """Tests for is_tiling_class and get_tiling_fields utilities."""
 
     def test_is_tiling_class_with_int_fields(self):
+        @dataclass
         class T:
             x: int
             y: int
@@ -39,18 +42,21 @@ class TestTilingUtilities:
         assert is_tiling_class(T) is True
 
     def test_is_tiling_class_with_float_fields(self):
+        @dataclass
         class T:
             a: float
 
         assert is_tiling_class(T) is True
 
     def test_is_tiling_class_with_bool_fields(self):
+        @dataclass
         class T:
             flag: bool
 
         assert is_tiling_class(T) is True
 
     def test_is_tiling_class_with_mixed_valid_fields(self):
+        @dataclass
         class T:
             x: int
             y: float
@@ -59,6 +65,7 @@ class TestTilingUtilities:
         assert is_tiling_class(T) is True
 
     def test_is_tiling_class_with_invalid_field_type(self):
+        @dataclass
         class T:
             x: int
             name: str  # str is not a valid tiling field type
@@ -77,6 +84,7 @@ class TestTilingUtilities:
         assert is_tiling_class(None) is False
 
     def test_get_tiling_fields_dtype_mapping(self):
+        @dataclass
         class T:
             x: int
             y: float
@@ -84,12 +92,13 @@ class TestTilingUtilities:
 
         fields = get_tiling_fields(T)
         assert fields == {
-            "x": ScalarFieldInfo(DataType.INT32),
+            "x": ScalarFieldInfo(DataType.INDEX),
             "y": ScalarFieldInfo(DataType.FP32),
             "flag": ScalarFieldInfo(DataType.BOOL),
         }
 
     def test_get_tiling_fields_preserves_order(self):
+        @dataclass
         class T:
             c: float
             a: int
@@ -103,16 +112,18 @@ class TestArrayType:
     """Tests for Array type and get_tiling_fields with array fields."""
 
     def test_array_type_creation(self):
+        @dataclass
         class T:
             offsets: Array[int, 4]
 
         assert is_tiling_class(T) is True
         fields = get_tiling_fields(T)
         assert isinstance(fields["offsets"], ArrayFieldInfo)
-        assert fields["offsets"].dtype == DataType.INT32
+        assert fields["offsets"].dtype == DataType.INDEX
         assert fields["offsets"].size == 4
 
     def test_array_type_float(self):
+        @dataclass
         class T:
             scales: Array[float, 2]
 
@@ -122,6 +133,7 @@ class TestArrayType:
         assert fields["scales"].size == 2
 
     def test_array_type_bool(self):
+        @dataclass
         class T:
             flags: Array[bool, 3]
 
@@ -147,12 +159,14 @@ class TestArrayType:
             Array[int, True]
 
     def test_is_tiling_class_with_array_field(self):
+        @dataclass
         class T:
             offsets: Array[int, 4]
 
         assert is_tiling_class(T) is True
 
     def test_is_tiling_class_mixed_scalar_and_array(self):
+        @dataclass
         class T:
             n: int
             offsets: Array[int, 3]
@@ -161,6 +175,7 @@ class TestArrayType:
         assert is_tiling_class(T) is True
 
     def test_get_tiling_fields_returns_array_field_info(self):
+        @dataclass
         class T:
             offsets: Array[int, 3]
 
@@ -168,17 +183,18 @@ class TestArrayType:
         assert "offsets" in fields
         info = fields["offsets"]
         assert isinstance(info, ArrayFieldInfo)
-        assert info.dtype == DataType.INT32
+        assert info.dtype == DataType.INDEX
         assert info.size == 3
 
     def test_get_tiling_fields_mixed(self):
+        @dataclass
         class T:
             n: int
             offsets: Array[float, 2]
 
         fields = get_tiling_fields(T)
         assert isinstance(fields["n"], ScalarFieldInfo)
-        assert fields["n"].dtype == DataType.INT32
+        assert fields["n"].dtype == DataType.INDEX
         assert isinstance(fields["offsets"], ArrayFieldInfo)
         assert fields["offsets"].dtype == DataType.FP32
         assert fields["offsets"].size == 2
@@ -188,13 +204,14 @@ class TestTilingParameter:
     """Tests for tiling parameter parsing in @pl.function."""
 
     def test_tiling_only_param_flattens_to_scalar_params(self):
+        @dataclass
         class Tiling:
             x: int
             y: float
 
         @pl.function
-        def kernel(tiling: Tiling) -> pl.Scalar[pl.INT32]:
-            result: pl.Scalar[pl.INT32] = tiling.x
+        def kernel(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
+            result: pl.Scalar[pl.INDEX] = tiling.x
             return result
 
         assert isinstance(kernel, ir.Function)
@@ -204,25 +221,27 @@ class TestTilingParameter:
         assert "tiling_y" in param_names
 
     def test_tiling_scalar_dtypes_are_correct(self):
+        @dataclass
         class Tiling:
             n: int
             scale: float
             flag: bool
 
         @pl.function
-        def kernel(tiling: Tiling) -> pl.Scalar[pl.INT32]:
-            result: pl.Scalar[pl.INT32] = tiling.n
+        def kernel(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
+            result: pl.Scalar[pl.INDEX] = tiling.n
             return result
 
         assert isinstance(kernel, ir.Function)
         assert len(kernel.params) == 3
         param_map = {p.name: p for p in kernel.params}
         assert isinstance(param_map["tiling_n"].type, ir.ScalarType)
-        assert param_map["tiling_n"].type.dtype == DataType.INT32
+        assert param_map["tiling_n"].type.dtype == DataType.INDEX
         assert param_map["tiling_scale"].type.dtype == DataType.FP32
         assert param_map["tiling_flag"].type.dtype == DataType.BOOL
 
     def test_tensors_plus_tiling_last(self):
+        @dataclass
         class Tiling:
             n: int
             m: int
@@ -253,24 +272,26 @@ class TestTilingParameter:
     def test_tiling_name_not_registered_in_scope(self):
         """Bare tiling name used without field access raises UndefinedVariableError."""
 
+        @dataclass
         class Tiling:
             x: int
 
         with pytest.raises(UndefinedVariableError):
 
             @pl.function
-            def kernel(tiling: Tiling) -> pl.Scalar[pl.INT32]:
+            def kernel(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
                 return tiling  # type: ignore[return-value]
 
     def test_tiling_field_access_resolves_to_correct_var(self):
         """Accessing tiling.x in the body resolves to the flattened IR var."""
 
+        @dataclass
         class Tiling:
             x: int
 
         @pl.function
-        def kernel(tiling: Tiling) -> pl.Scalar[pl.INT32]:
-            result: pl.Scalar[pl.INT32] = tiling.x
+        def kernel(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
+            result: pl.Scalar[pl.INDEX] = tiling.x
             return result
 
         assert isinstance(kernel, ir.Function)
@@ -280,12 +301,13 @@ class TestTilingParameter:
     def test_tiling_registry_reset_between_functions(self):
         """Tiling registry is reset for each new function, preventing leakage."""
 
+        @dataclass
         class Tiling:
             n: int
 
         @pl.function
         def func1(tiling: Tiling):
-            x: pl.Scalar[pl.INT32] = tiling.n
+            x: pl.Scalar[pl.INDEX] = tiling.n
             return x
 
         # Second function should not see tiling from first function
@@ -303,6 +325,7 @@ class TestTilingErrors:
     def test_tiling_not_last_raises_parser_syntax_error(self):
         """Tiling parameter that is not the last param raises ParserSyntaxError."""
 
+        @dataclass
         class Tiling:
             x: int
 
@@ -318,9 +341,11 @@ class TestTilingErrors:
     def test_multiple_tiling_params_raises_parser_syntax_error(self):
         """More than one tiling parameter raises ParserSyntaxError."""
 
+        @dataclass
         class TilingA:
             x: int
 
+        @dataclass
         class TilingB:
             y: float
 
@@ -336,14 +361,15 @@ class TestTilingErrors:
     def test_nonexistent_tiling_field_raises_parser_type_error(self):
         """Accessing a field that doesn't exist on tiling raises ParserTypeError."""
 
+        @dataclass
         class Tiling:
             x: int
 
         with pytest.raises(ParserTypeError, match="has no field"):
 
             @pl.function
-            def kernel(tiling: Tiling) -> pl.Scalar[pl.INT32]:
-                result: pl.Scalar[pl.INT32] = tiling.nonexistent  # type: ignore[attr-defined]
+            def kernel(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
+                result: pl.Scalar[pl.INDEX] = tiling.nonexistent  # type: ignore[attr-defined]
                 return result
 
 
@@ -351,12 +377,13 @@ class TestTilingArrayField:
     """Tests for array field support in tiling parameters."""
 
     def test_array_field_flattens_to_scalar_params(self):
+        @dataclass
         class Tiling:
             offsets: Array[int, 3]
 
         @pl.function
-        def kernel(tiling: Tiling) -> pl.Scalar[pl.INT32]:
-            result: pl.Scalar[pl.INT32] = tiling.offsets[0]
+        def kernel(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
+            result: pl.Scalar[pl.INDEX] = tiling.offsets[0]
             return result
 
         assert isinstance(kernel, ir.Function)
@@ -367,35 +394,37 @@ class TestTilingArrayField:
         assert "tiling_offsets_2" in param_names
 
     def test_array_field_dtypes(self):
+        @dataclass
         class Tiling:
             ints: Array[int, 2]
             floats: Array[float, 2]
             bools: Array[bool, 2]
 
         @pl.function
-        def kernel(tiling: Tiling) -> pl.Scalar[pl.INT32]:
-            result: pl.Scalar[pl.INT32] = tiling.ints[0]
+        def kernel(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
+            result: pl.Scalar[pl.INDEX] = tiling.ints[0]
             return result
 
         assert isinstance(kernel, ir.Function)
         assert len(kernel.params) == 6
         param_map = {p.name: p for p in kernel.params}
-        assert param_map["tiling_ints_0"].type.dtype == DataType.INT32
-        assert param_map["tiling_ints_1"].type.dtype == DataType.INT32
+        assert param_map["tiling_ints_0"].type.dtype == DataType.INDEX
+        assert param_map["tiling_ints_1"].type.dtype == DataType.INDEX
         assert param_map["tiling_floats_0"].type.dtype == DataType.FP32
         assert param_map["tiling_floats_1"].type.dtype == DataType.FP32
         assert param_map["tiling_bools_0"].type.dtype == DataType.BOOL
         assert param_map["tiling_bools_1"].type.dtype == DataType.BOOL
 
     def test_mixed_scalar_and_array_fields(self):
+        @dataclass
         class Tiling:
             n: int
             offsets: Array[int, 2]
             scale: float
 
         @pl.function
-        def kernel(tiling: Tiling) -> pl.Scalar[pl.INT32]:
-            result: pl.Scalar[pl.INT32] = tiling.n
+        def kernel(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
+            result: pl.Scalar[pl.INDEX] = tiling.n
             return result
 
         assert isinstance(kernel, ir.Function)
@@ -408,12 +437,13 @@ class TestTilingArrayField:
         assert "tiling_scale" in param_names
 
     def test_array_subscript_access(self):
+        @dataclass
         class Tiling:
             offsets: Array[int, 3]
 
         @pl.function
-        def kernel(tiling: Tiling) -> pl.Scalar[pl.INT32]:
-            result: pl.Scalar[pl.INT32] = tiling.offsets[1]
+        def kernel(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
+            result: pl.Scalar[pl.INDEX] = tiling.offsets[1]
             return result
 
         assert isinstance(kernel, ir.Function)
@@ -422,22 +452,23 @@ class TestTilingArrayField:
         assert "tiling_offsets_1" in param_names
 
     def test_array_all_indices_accessible(self):
+        @dataclass
         class Tiling:
             vals: Array[int, 3]
 
         @pl.function
-        def kernel0(tiling: Tiling) -> pl.Scalar[pl.INT32]:
-            result: pl.Scalar[pl.INT32] = tiling.vals[0]
+        def kernel0(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
+            result: pl.Scalar[pl.INDEX] = tiling.vals[0]
             return result
 
         @pl.function
-        def kernel1(tiling: Tiling) -> pl.Scalar[pl.INT32]:
-            result: pl.Scalar[pl.INT32] = tiling.vals[1]
+        def kernel1(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
+            result: pl.Scalar[pl.INDEX] = tiling.vals[1]
             return result
 
         @pl.function
-        def kernel2(tiling: Tiling) -> pl.Scalar[pl.INT32]:
-            result: pl.Scalar[pl.INT32] = tiling.vals[2]
+        def kernel2(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
+            result: pl.Scalar[pl.INDEX] = tiling.vals[2]
             return result
 
         assert isinstance(kernel0, ir.Function)
@@ -445,47 +476,55 @@ class TestTilingArrayField:
         assert isinstance(kernel2, ir.Function)
 
     def test_array_bare_name_raises_type_error(self):
+        @dataclass
         class Tiling:
             offsets: Array[int, 3]
 
         with pytest.raises(ParserTypeError, match="must be accessed with an integer index"):
 
             @pl.function
-            def kernel(tiling: Tiling) -> pl.Scalar[pl.INT32]:
-                result: pl.Scalar[pl.INT32] = tiling.offsets  # type: ignore[assignment]
+            def kernel(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
+                result: pl.Scalar[pl.INDEX] = tiling.offsets  # type: ignore[assignment]
                 return result
 
     def test_array_out_of_bounds_raises_type_error(self):
+        @dataclass
         class Tiling:
             offsets: Array[int, 3]
 
         with pytest.raises(ParserTypeError, match="out of bounds"):
 
             @pl.function
-            def kernel(tiling: Tiling) -> pl.Scalar[pl.INT32]:
-                result: pl.Scalar[pl.INT32] = tiling.offsets[99]
+            def kernel(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
+                result: pl.Scalar[pl.INDEX] = tiling.offsets[99]
                 return result
 
     def test_array_non_literal_index_raises_error(self):
+        @dataclass
         class Tiling:
             offsets: Array[int, 3]
 
         with pytest.raises(UnsupportedFeatureError, match="literal integer indices"):
 
             @pl.function
-            def kernel(tiling: Tiling) -> pl.Scalar[pl.INT32]:
+            def kernel(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
                 # Use a previously-computed value as subscript (non-literal)
-                first: pl.Scalar[pl.INT32] = tiling.offsets[0]
-                result: pl.Scalar[pl.INT32] = tiling.offsets[first]  # type: ignore[index]
+                first: pl.Scalar[pl.INDEX] = tiling.offsets[0]
+                result: pl.Scalar[pl.INDEX] = tiling.offsets[first]  # type: ignore[index]
                 return result
 
     def test_scalar_subscript_raises_type_error(self):
+        @dataclass
         class Tiling:
             n: int
 
         with pytest.raises(ParserTypeError, match="does not support subscript access"):
 
             @pl.function
-            def kernel(tiling: Tiling) -> pl.Scalar[pl.INT32]:
-                result: pl.Scalar[pl.INT32] = tiling.n[0]  # type: ignore[index]
+            def kernel(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
+                result: pl.Scalar[pl.INDEX] = tiling.n[0]  # type: ignore[index]
                 return result
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

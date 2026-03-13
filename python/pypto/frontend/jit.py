@@ -44,17 +44,21 @@ _TORCH_TO_PL_DTYPE: dict = {
 }
 
 # pl DataType → ctypes type (used to wrap scalar args before the ctypes call)
-_PL_DTYPE_TO_CTYPE: dict = {
-    DataType.FP32:   ctypes.c_float,
-    DataType.INT8:   ctypes.c_int8,
-    DataType.INT16:  ctypes.c_int16,
-    DataType.INT32:  ctypes.c_int32,
-    DataType.INT64:  ctypes.c_int64,
-    DataType.UINT8:  ctypes.c_uint8,
-    DataType.UINT16: ctypes.c_uint16,
-    DataType.UINT32: ctypes.c_uint32,
-    DataType.UINT64: ctypes.c_uint64,
-    DataType.BOOL:   ctypes.c_bool,
+# Keyed by str(DataType) because nanobind DataType objects returned from IR introspection
+# are distinct Python objects that compare equal (==) but have different hash values,
+# making DataType-keyed dicts unreliable.
+_PL_DTYPE_TO_CTYPE: dict[str, type] = {
+    str(DataType.FP32):   ctypes.c_float,
+    str(DataType.INT8):   ctypes.c_int8,
+    str(DataType.INT16):  ctypes.c_int16,
+    str(DataType.INT32):  ctypes.c_int32,
+    str(DataType.INT64):  ctypes.c_int64,
+    str(DataType.UINT8):  ctypes.c_uint8,
+    str(DataType.UINT16): ctypes.c_uint16,
+    str(DataType.UINT32): ctypes.c_uint32,
+    str(DataType.UINT64): ctypes.c_uint64,
+    str(DataType.BOOL):   ctypes.c_bool,
+    str(DataType.INDEX):  ctypes.c_int64,
 }
 
 
@@ -273,6 +277,41 @@ def _validate_scalar_arg(i: int, arg, spec: ParamSpec) -> None:
         )
 
 
+def _expand_tiling_args(args: tuple) -> tuple:
+    """If the last arg is a tiling class instance, expand it to flat scalar values.
+
+    Tiling fields are flattened in declaration order:
+      - scalar field  → one value (int/float/bool)
+      - Array[T, N]  → N individual values
+
+    Args:
+        args: Runtime arguments tuple passed to launch.
+
+    Returns:
+        New args tuple with tiling instance replaced by flat scalar values,
+        or the original args if no tiling instance is present.
+    """
+    from pypto.language.typing.tiling import (
+        is_tiling_class, get_tiling_fields, ArrayFieldInfo,
+    )
+    if not args:
+        return args
+    last_arg = args[-1]
+    if not is_tiling_class(type(last_arg)):
+        return args
+
+    fields = get_tiling_fields(type(last_arg))
+    flat_values: list = []
+    for field_name, field_info in fields.items():
+        val = getattr(last_arg, field_name)
+        if isinstance(field_info, ArrayFieldInfo):
+            for i in range(field_info.size):
+                flat_values.append(val[i])
+        else:
+            flat_values.append(val)
+    return args[:-1] + tuple(flat_values)
+
+
 def _validate_args(args: tuple, param_specs: list[ParamSpec]) -> None:
     """Validate runtime args against the kernel's IR parameter descriptions.
 
@@ -307,7 +346,7 @@ def _args_to_ctypes(args: tuple, param_specs: list[ParamSpec]) -> list:
                     if isinstance(dim, str):
                         dyn_var_values.setdefault(dim, arg.shape[d])
         else:
-            ctype = _PL_DTYPE_TO_CTYPE.get(spec.dtype)
+            ctype = _PL_DTYPE_TO_CTYPE.get(str(spec.dtype))
             if ctype is None:
                 raise TypeError(
                     f"No ctypes mapping for scalar dtype {spec.dtype} "
@@ -347,9 +386,6 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220"):
     # step 1, Program -> PtoAs-mlir
     codegen = PTOCodegen()
     mlir_code = _get_mlir_code(codegen.generate(prog))
-    print("===== Generated MLIR =====")
-    print(mlir_code)
-    print("==========================")
     with open(ir_path, "w") as f:
         f.write(mlir_code)
 
@@ -429,6 +465,7 @@ def load_lib(lib_path: str, param_specs: list[ParamSpec], clean_up: bool = False
     default_block_dim = 1  # TODO: extend kernel to multi-core
 
     def func_wrapper(*args, block_dim=default_block_dim, stream=None):
+        args = _expand_tiling_args(args)
         _validate_args(args, param_specs)
         if stream is None:
             stream = torch.npu.current_stream()

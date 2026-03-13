@@ -19,6 +19,7 @@ Tests verify:
 - SSA form with correct variable naming
 """
 
+from dataclasses import dataclass
 import pypto.language as pl
 import pytest
 from pypto import DataType, backend, codegen, ir
@@ -168,6 +169,7 @@ def test_pto_codegen_tiling():
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.PTO)
 
+    @dataclass
     class Tiling:
         n: int
         m: int
@@ -196,7 +198,7 @@ def test_pto_codegen_tiling():
     # Generate MLIR
     codegen = PTOCodegen()
     mlir_code = _get_mlir_code(codegen.generate(transformed_program))
-    assert("%arg2: i32, %arg3: i32, %arg4: f32, %arg5: f32, %arg6: f32" in mlir_code)
+    assert("%arg2: index, %arg3: index, %arg4: f32, %arg5: f32, %arg6: f32" in mlir_code)
     assert("arith.addi %arg2, %arg3 : index" in mlir_code)
     assert("arith.mulf %arg4, %arg5 : f32" in mlir_code)
 
