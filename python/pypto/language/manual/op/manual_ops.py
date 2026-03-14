@@ -22,10 +22,10 @@ Typical usage::
     a   = pm.make_tile([64, 64], pm.FP32)
     b   = pm.make_tile([64, 64], pm.FP32)
 
-    pm.load(tensor_a, [0, 0], [64, 64], a)
-    pm.load(tensor_b, [0, 0], [64, 64], b)
+    pm.load(a, tensor_a, [0, 0])
+    pm.load(b, tensor_b, [0, 0])
     pm.add(a, b, out)
-    pm.store(out, [0, 0], [64, 64], result_tensor)
+    pm.store(result_tensor, out, [0, 0])
 """
 
 from collections.abc import Sequence
@@ -33,6 +33,7 @@ from typing import Literal, Optional, Sequence, Union
 
 from dataclasses import dataclass
 from pypto.ir.op import block_ops as _ir_block_ops
+from pypto.ir.op import manual_ops as _ir_manual
 from pypto.ir.utils import _to_make_tuple
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
@@ -128,17 +129,17 @@ def make_tile(
 # ---------------------------------------------------------------------------
 
 def load(
+    out: Tile,
     tensor: Tensor,
     offsets: Sequence[int | Expr],
-    out: Tile,
     shapes: Sequence[int | Expr] | None = None,
 ) -> None:
     """Load data from a global tensor into a pre-allocated tile.
 
     Args:
+        out: Pre-allocated destination tile; rebound on return.
         tensor: Source global tensor.
         offsets: Per-dimension offsets into the tensor.
-        out: Pre-allocated destination tile; rebound on return.
         shapes: Number of elements to load in each dimension. When omitted,
             no ``pto.set_validshape`` instruction is emitted and the full
             tile allocation size is used.
@@ -155,58 +156,32 @@ def load_tile(
     out: Tile,
     tensor: Tensor,
     tile_offsets: Sequence[int | Expr],
-    shapes: Sequence[int | Expr],
 ) -> None:
     """Load data from a global tensor into a pre-allocated tile using tile-relative offsets.
 
-    This is a convenience wrapper around :func:`load` that accepts tile-relative
-    offsets instead of absolute tensor offsets. The absolute offset is computed as:
-    ``absolute_offset[i] = tile_offsets[i] * shapes[i]``
+    The absolute offset is computed as ``absolute_offset[i] = tile_offsets[i] * shape[i]``,
+    where ``shape`` is inferred from the tile type of ``out``.
 
     Args:
         out: Pre-allocated destination tile; rebound on return.
         tensor: Source global tensor.
         tile_offsets: Per-dimension offsets in units of tiles (relative to tile shape).
-        shapes: Number of elements to load in each dimension (tile shape).
-
-    Example:
-        >>> tile_a = plm.create_tile([64, 128], dtype=pl.FP16, ...)
-        >>> # These two calls are equivalent:
-        >>> plm.load(a, [128, 128], [64, 128], out=tile_a)       # absolute offset
-        >>> plm.load_tile(tile_a, a, [2, 1], [64, 128])           # tile-relative offset
-        >>> # absolute_offset = [2*64, 1*128] = [128, 128]
     """
-    if len(tile_offsets) != len(shapes):
-        raise ValueError(
-            f"tile_offsets and shapes must have same number of dimensions, "
-            f"got {len(tile_offsets)} tile_offsets and {len(shapes)} shapes"
-        )
-
-    abs_offsets = [t_off * shape for t_off, shape in zip(tile_offsets, shapes)]
-
-    _op(
-        "manual.load",
-        [tensor.unwrap(), _to_make_tuple(abs_offsets), _ir_core.MakeTuple([], _span())],
-        out
-    )
+    out._expr = _ir_manual.load_tile(out.unwrap(), tensor.unwrap(), _to_make_tuple(tile_offsets))
 
 
 def store(
+    output_tensor: Tensor,
     tile: Tile,
     offsets: Sequence[int | Expr],
-    output_tensor: Tensor,
     shapes: Sequence[int | Expr] | None = None,
 ) -> Tensor:
     """Store data from a tile back to a global tensor.
 
-    This operation is identical to the SSA ``block.store``; the output is the
-    updated tensor expression rather than a tile, so no explicit ``out`` tile
-    is needed.
-
     Args:
+        output_tensor: Destination tensor.
         tile: Source tile.
         offsets: Per-dimension offsets into the output tensor.
-        output_tensor: Destination tensor.
         shapes: Shape of the region to store. When omitted, no
             ``pto.set_validshape`` instruction is emitted and the full tile
             allocation size is used.
@@ -229,38 +204,21 @@ def store_tile(
     output_tensor: Tensor,
     tile: Tile,
     tile_offsets: Sequence[int | Expr],
-    shapes: Sequence[int | Expr],
 ) -> Tensor:
     """Store data from a tile back to a global tensor using tile-relative offsets.
 
-    This is a convenience wrapper around :func:`store` that accepts tile-relative
-    offsets instead of absolute tensor offsets. The absolute offset is computed as:
-    ``absolute_offset[i] = tile_offsets[i] * shapes[i]``
+    The absolute offset is computed as ``absolute_offset[i] = tile_offsets[i] * shape[i]``,
+    where ``shape`` is inferred from the tile type.
 
     Args:
         output_tensor: Destination tensor.
         tile: Source tile.
         tile_offsets: Per-dimension offsets in units of tiles (relative to tile shape).
-        shapes: Shape of the region to store (tile shape).
 
     Returns:
         Tensor wrapping the store result.
-
-    Example:
-        >>> tile_a = plm.create_tile([64, 128], dtype=pl.FP16, ...)
-        >>> # These two calls are equivalent:
-        >>> plm.store(tile_a, [128, 256], [64, 128], out_tensor)    # absolute offset
-        >>> plm.store_tile(out_tensor, tile_a, [2, 2], [64, 128])   # tile-relative offset
-        >>> # absolute_offset = [2*64, 2*128] = [128, 256]
     """
-    abs_offsets = [t_off * shape for t_off, shape in zip(tile_offsets, shapes)]
-    span = _span()
-    return Tensor(expr=_ir_core.create_op_call(
-        "manual.store",
-        [tile.unwrap(), _to_make_tuple(abs_offsets), _ir_core.MakeTuple([], span), output_tensor.unwrap()],
-        {},
-        span,
-    ))
+    return Tensor(expr=_ir_manual.store_tile(output_tensor.unwrap(), tile.unwrap(), _to_make_tuple(tile_offsets)))
 
 
 def l0c_store(

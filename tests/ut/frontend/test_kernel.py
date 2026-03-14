@@ -54,7 +54,7 @@ def load_kernel(
         pad=2,
     )
     tile_a = plm.make_tile(tile_type_a, addr=0x0000, size=16384)
-    plm.load(a, [0, 0], out=tile_a)
+    plm.load(tile_a, a, [0, 0])
 
     tile_type_b = plm.TileType(
         shape=[64, 128],
@@ -67,7 +67,7 @@ def load_kernel(
         pad=2,
     )
     tile_b = plm.make_tile(tile_type_b, addr=0x4000, size=16384)
-    plm.load(b, [0, 0], out=tile_b)
+    plm.load(tile_b, b, [0, 0])
     return b
 
 
@@ -83,7 +83,7 @@ def add_kernel(
         target_memory=pl.MemorySpace.Vec,
     )
     tile_a = plm.make_tile(tile_type_a, addr=0x0000, size=16384)
-    plm.load(a, [0, 0], out=tile_a)
+    plm.load(tile_a, a, [0, 0])
 
     tile_type_b = plm.TileType(
         shape=[64, 128],
@@ -91,7 +91,7 @@ def add_kernel(
         target_memory=pl.MemorySpace.Vec,
     )
     tile_b = plm.make_tile(tile_type_b, addr=0x4000, size=16384)
-    plm.load(b, [0, 0], out=tile_b)
+    plm.load(tile_b, b, [0, 0])
 
     tile_type_c = plm.TileType(
         shape=[64, 128],
@@ -99,7 +99,7 @@ def add_kernel(
         target_memory=pl.MemorySpace.Vec,
     )
     tile_c = plm.make_tile(tile_type_c, addr=0x8000, size=16384)
-    plm.add(tile_a, tile_b, out=tile_c)
+    plm.add(tile_c, tile_a, tile_b)
     return b
 
 
@@ -115,7 +115,7 @@ def mul_kernel(
         target_memory=pl.MemorySpace.Vec,
     )
     tile_a = plm.make_tile(tile_type_a, addr=0x0000, size=16384)
-    plm.load(a, [0, 0], out=tile_a)
+    plm.load(tile_a, a, [0, 0])
 
     tile_type_b = plm.TileType(
         shape=[64, 128],
@@ -123,7 +123,7 @@ def mul_kernel(
         target_memory=pl.MemorySpace.Vec,
     )
     tile_b = plm.make_tile(tile_type_b, addr=0x4000, size=16384)
-    plm.load(b, [0, 0], out=tile_b)
+    plm.load(tile_b, b, [0, 0])
 
     tile_type_c = plm.TileType(
         shape=[64, 128],
@@ -131,7 +131,7 @@ def mul_kernel(
         target_memory=pl.MemorySpace.Vec,
     )
     tile_c = plm.make_tile(tile_type_c, addr=0x8000, size=16384)
-    plm.mul(tile_a, tile_b, out=tile_c)
+    plm.mul(tile_c, tile_a, tile_b)
     return b
 
 
@@ -146,7 +146,7 @@ def neg_kernel(
         target_memory=pl.MemorySpace.Vec,
     )
     tile_a = plm.make_tile(tile_type_a, addr=0x0000, size=16384)
-    plm.load(a, [0, 0], out=tile_a)
+    plm.load(tile_a, a, [0, 0])
 
     tile_type_b = plm.TileType(
         shape=[64, 128],
@@ -154,7 +154,7 @@ def neg_kernel(
         target_memory=pl.MemorySpace.Vec,
     )
     tile_b = plm.make_tile(tile_type_b, addr=0x4000, size=16384)
-    plm.neg(tile_a, out=tile_b)
+    plm.neg(tile_b, tile_a)
     return a
 
 

@@ -75,22 +75,22 @@ def dynamic_matmul_kernel(
         for i in pl.range(0, M_dim, 32):
             for j in pl.range(0, N_dim, 32):
                 for k in pl.range(0, K_dim, 32):
-                    plm.load(a, [i, k], out=tile_a_load)
-                    plm.load(b, [k, j], out=tile_b_load)
+                    plm.load(tile_a_load, a, [i, k])
+                    plm.load(tile_b_load, b, [k, j])
                     
                     pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
                     pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
                     
-                    plm.move(tile_a_load, out=tile_a, target_memory=pl.MemorySpace.Left)
-                    plm.move(tile_b_load, out=tile_b, target_memory=pl.MemorySpace.Right)
+                    plm.move(tile_a, tile_a_load, target_memory=pl.MemorySpace.Left)
+                    plm.move(tile_b, tile_b_load, target_memory=pl.MemorySpace.Right)
                     
                     pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=0)
                     pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=0)
                     
                     if k == 0:
-                        plm.matmul(tile_a, tile_b, out=tile_c)
+                        plm.matmul(tile_c, tile_a, tile_b)
                     else:
-                        plm.matmul_acc(tile_c, tile_a, tile_b, out=tile_c)
+                        plm.matmul_acc(tile_c, tile_c, tile_a, tile_b)
                     
                     pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE2, event_id=0)
                     pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE2, event_id=0)

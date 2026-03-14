@@ -53,7 +53,7 @@ def _extract_partition_view_offsets(mlir: str) -> list[tuple[int, int]]:
 def load_kernel_compare(
     a: pl.Tensor[[256, 512], pl.FP16],
 ) -> pl.Tensor[[256, 512], pl.FP16]:
-    tile_a = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
+    tile_a = plm.make_tile(plm.TileType(shape=[64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec),
                              addr=0x0000, size=16384)
     plm.load(tile_a, a, [128, 256])
     return a
@@ -63,7 +63,7 @@ def load_kernel_compare(
 def load_tile_kernel_compare(
     a: pl.Tensor[[256, 512], pl.FP16],
 ) -> pl.Tensor[[256, 512], pl.FP16]:
-    tile_a = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
+    tile_a = plm.make_tile(plm.TileType(shape=[64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec),
                              addr=0x0000, size=16384)
     plm.load_tile(tile_a, a, [2, 2])
     return a
@@ -73,7 +73,7 @@ def load_tile_kernel_compare(
 def store_kernel_compare(
     a: pl.Tensor[[256, 512], pl.FP16],
 ) -> pl.Tensor[[256, 512], pl.FP16]:
-    tile_a = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
+    tile_a = plm.make_tile(plm.TileType(shape=[64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec),
                              addr=0x0000, size=16384)
     plm.store(a, tile_a, [128, 256])
     return a
@@ -83,7 +83,7 @@ def store_kernel_compare(
 def store_tile_kernel_compare(
     a: pl.Tensor[[256, 512], pl.FP16],
 ) -> pl.Tensor[[256, 512], pl.FP16]:
-    tile_a = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
+    tile_a = plm.make_tile(plm.TileType(shape=[64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec),
                              addr=0x0000, size=16384)
     plm.store_tile(a, tile_a, [2, 2])
     return a
@@ -135,7 +135,7 @@ def test_store_tile_vs_store_same_mlir():
 def load_dynamic_kernel_compare(
     a: pl.Tensor[[256, 512], pl.FP16],
 ) -> pl.Tensor[[256, 512], pl.FP16]:
-    tile_a = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
+    tile_a = plm.make_tile(plm.TileType(shape=[64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec),
                              addr=0x0000, size=16384)
     for i in pl.range(4):
         plm.load(tile_a, a, [i * 64, 0])
@@ -146,7 +146,7 @@ def load_dynamic_kernel_compare(
 def load_tile_dynamic_kernel_compare(
     a: pl.Tensor[[256, 512], pl.FP16],
 ) -> pl.Tensor[[256, 512], pl.FP16]:
-    tile_a = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
+    tile_a = plm.make_tile(plm.TileType(shape=[64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec),
                              addr=0x0000, size=16384)
     for i in pl.range(4):
         plm.load_tile(tile_a, a, [i, 0])
@@ -157,7 +157,7 @@ def load_tile_dynamic_kernel_compare(
 def store_dynamic_kernel_compare(
     a: pl.Tensor[[256, 512], pl.FP16],
 ) -> pl.Tensor[[256, 512], pl.FP16]:
-    tile_a = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
+    tile_a = plm.make_tile(plm.TileType(shape=[64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec),
                              addr=0x0000, size=16384)
     for i in pl.range(4):
         plm.store(a, tile_a, [i * 64, 0])
@@ -168,7 +168,7 @@ def store_dynamic_kernel_compare(
 def store_tile_dynamic_kernel_compare(
     a: pl.Tensor[[256, 512], pl.FP16],
 ) -> pl.Tensor[[256, 512], pl.FP16]:
-    tile_a = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
+    tile_a = plm.make_tile(plm.TileType(shape=[64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec),
                              addr=0x0000, size=16384)
     for i in pl.range(4):
         plm.store_tile(a, tile_a, [i, 0])

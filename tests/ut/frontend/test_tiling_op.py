@@ -62,21 +62,21 @@ def tiling_op_kernel(
         for i in pl.range(0, M_dim, 64):
             for j in pl.range(0, N_dim, 128):
                 pl.system.bar_all()
-                plm.load(x, [i, j], [64, 128], out=tile_a)
-                plm.load(y, [i, j], [64, 128], out=tile_b)
+                plm.load(tile_a, x, [i, j])
+                plm.load(tile_b, y, [i, j])
                 pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
                 pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
 
                 if tiling.opkind == 0:
-                    plm.add(tile_a, tile_b, out=tile_c)
+                    plm.add(tile_c, tile_a, tile_b)
                 elif tiling.opkind == 1:
-                    plm.sub(tile_a, tile_b, out=tile_c)
+                    plm.sub(tile_c, tile_a, tile_b)
                 else:
-                    plm.mul(tile_a, tile_b, out=tile_c)
+                    plm.mul(tile_c, tile_a, tile_b)
 
                 pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
                 pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
-                plm.store(tile_c, [i, j], [64, 128], z)
+                plm.store(z, tile_c, [i, j])
     return z
 
 

@@ -31,20 +31,20 @@ def add_kernel(
     y: pl.Tensor[[64, 128], pl.FP16],
     z: pl.Tensor[[64, 128], pl.FP16]
 ) -> pl.Tensor[[64, 128], pl.FP16]:
-    tile_a = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
+    tile_a = plm.make_tile(plm.TileType(shape=[64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec),
                              addr=0x0000, size=16384)
-    tile_b = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
+    tile_b = plm.make_tile(plm.TileType(shape=[64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec),
                              addr=0x0000, size=16384)
-    tile_c = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
+    tile_c = plm.make_tile(plm.TileType(shape=[64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec),
                              addr=0x0000, size=16384)
     with pl.section_vector():
-        plm.load(x, [0, 0], out=tile_a)
+        plm.load(tile_a, x, [0, 0])
 
-        plm.load(y, [0, 0], out=tile_b)
+        plm.load(tile_b, y, [0, 0])
 
-        plm.add(tile_a, tile_b, out=tile_c)
+        plm.add(tile_c, tile_a, tile_b)
 
-        plm.store(tile_c, [0, 0], z)
+        plm.store(z, tile_c, [0, 0])
     return z
 
 
