@@ -22,11 +22,12 @@ import torch_npu
 import pypto.frontend as fe
 import pypto.language as pl
 import pypto.language.manual as plm
+from pypto.language.typing.tiling import Array, ArrayInstance
 
 
 @dataclass
 class OpTiling:
-    placeholder_before_1: int   # padding field before opkind
+    placeholder_before_1: Array[int, 60]   # padding field before opkind
     placeholder_before_2: int   # padding field before opkind
     opkind: int                 # operation: 0=add, 1=sub, 2=mul
     placeholder_after: int      # padding field after opkind
@@ -101,8 +102,11 @@ def test_tiling_op():
 
         for opkind, ref_fn, op_name in op_cases:
             z = torch.empty(shape, device=device, dtype=dtype)
+            placeholder: ArrayInstance = Array[int, 60]()
+            for i in range(60):
+                placeholder[i] = i
             tiling = OpTiling(
-                placeholder_before_1=0,
+                placeholder_before_1=placeholder,
                 placeholder_before_2=0,
                 opkind=opkind,
                 placeholder_after=0,

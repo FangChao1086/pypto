@@ -23,6 +23,7 @@ from pypto.language.parser.diagnostics import (
 from pypto.language.typing.tiling import (
     Array,
     ArrayFieldInfo,
+    ArrayInstance,
     ScalarFieldInfo,
     get_tiling_fields,
     is_tiling_class,
@@ -524,6 +525,120 @@ class TestTilingArrayField:
             def kernel(tiling: Tiling) -> pl.Scalar[pl.INDEX]:
                 result: pl.Scalar[pl.INDEX] = tiling.n[0]  # type: ignore[index]
                 return result
+
+
+class TestArrayInstance:
+    """Tests for ArrayInstance runtime container."""
+
+    def test_construct_from_list(self):
+        arr = Array[int, 3]([10, 20, 30])
+        assert isinstance(arr, ArrayInstance)
+        assert arr[0] == 10
+        assert arr[1] == 20
+        assert arr[2] == 30
+
+    def test_construct_variadic(self):
+        arr = Array[int, 3](10, 20, 30)
+        assert arr[0] == 10
+        assert arr[1] == 20
+        assert arr[2] == 30
+
+    def test_construct_zero_init(self):
+        arr = Array[int, 4]()
+        assert len(arr) == 4
+        assert all(v == 0 for v in arr)
+
+    def test_construct_zero_init_float(self):
+        arr = Array[float, 2]()
+        assert arr[0] == 0.0
+        assert arr[1] == 0.0
+
+    def test_construct_zero_init_bool(self):
+        arr = Array[bool, 3]()
+        assert all(v is False for v in arr)
+
+    def test_len(self):
+        arr = Array[int, 60]([0] * 60)
+        assert len(arr) == 60
+
+    def test_iter(self):
+        arr = Array[int, 3]([1, 2, 3])
+        assert list(arr) == [1, 2, 3]
+
+    def test_setitem_direct(self):
+        arr = Array[int, 3]([0, 0, 0])
+        arr[1] = 99
+        assert arr[1] == 99
+
+    def test_loop_assignment(self):
+        """Verify that values set via a loop are correctly stored."""
+        arr = Array[int, 60]([0] * 60)
+        for i in range(60):
+            arr[i] = i * 2
+        for i in range(60):
+            assert arr[i] == i * 2
+
+    def test_loop_assignment_large(self):
+        """Verify loop-assigned array can be iterated to retrieve values."""
+        arr = Array[int, 60]()
+        for i in range(60):
+            arr[i] = i + 1
+        assert list(arr) == list(range(1, 61))
+
+    def test_wrong_size_raises(self):
+        with pytest.raises(ValueError, match="requires exactly 3 elements, got 2"):
+            Array[int, 3]([0, 1])
+
+    def test_wrong_size_variadic_raises(self):
+        with pytest.raises(ValueError, match="requires exactly 3 elements, got 5"):
+            Array[int, 3](0, 1, 2, 3, 4)
+
+    def test_repr(self):
+        arr = Array[int, 2]([7, 8])
+        assert "Array[int, 2]" in repr(arr)
+        assert "[7, 8]" in repr(arr)
+
+
+class TestExpandTilingArgs:
+    """Tests for _expand_tiling_args validation with ArrayInstance."""
+
+    def test_expand_with_array_instance(self):
+        from dataclasses import dataclass
+        from pypto.frontend.jit import _expand_tiling_args
+
+        @dataclass
+        class T:
+            arr: Array[int, 3]
+            n: int
+
+        t = T(arr=Array[int, 3]([10, 20, 30]), n=5)
+        result = _expand_tiling_args((t,))
+        assert result == (10, 20, 30, 5)
+
+    def test_expand_raises_type_error_for_scalar_in_array_field(self):
+        from dataclasses import dataclass
+        from pypto.frontend.jit import _expand_tiling_args
+
+        @dataclass
+        class T:
+            arr: Array[int, 3]
+
+        t = T(arr=0)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="expected an indexable sequence"):
+            _expand_tiling_args((t,))
+
+    def test_expand_raises_value_error_for_wrong_size(self):
+        from dataclasses import dataclass
+        from pypto.frontend.jit import _expand_tiling_args
+
+        @dataclass
+        class T:
+            arr: Array[int, 3]
+
+        # Bypass ArrayInstance validation by using a plain list of wrong size
+        t = T(arr=[0, 1])  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="expected 3 elements, got 2"):
+            _expand_tiling_args((t,))
 
 
 if __name__ == "__main__":

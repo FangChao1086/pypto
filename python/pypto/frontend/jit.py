@@ -305,6 +305,16 @@ def _expand_tiling_args(args: tuple) -> tuple:
     for field_name, field_info in fields.items():
         val = getattr(last_arg, field_name)
         if isinstance(field_info, ArrayFieldInfo):
+            if not hasattr(val, "__getitem__") or not hasattr(val, "__len__"):
+                raise TypeError(
+                    f"Tiling field '{field_name}' is Array[T, {field_info.size}]: "
+                    f"expected an indexable sequence (e.g. Array[int, {field_info.size}]([...])), "
+                    f"got {type(val).__name__!r}"
+                )
+            if len(val) != field_info.size:
+                raise ValueError(
+                    f"Tiling field '{field_name}' expected {field_info.size} elements, got {len(val)}"
+                )
             for i in range(field_info.size):
                 flat_values.append(val[i])
         else:

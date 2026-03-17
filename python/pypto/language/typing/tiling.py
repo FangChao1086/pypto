@@ -20,6 +20,42 @@ _PYTHON_TYPE_TO_DTYPE: dict[type, DataType] = {
     bool: DataType.BOOL,
 }
 
+_DTYPE_DEFAULT: dict[type, int | float | bool] = {int: 0, float: 0.0, bool: False}
+
+
+class ArrayInstance:
+    """Runtime fixed-size array value for tiling class fields.
+
+    Construct via the Array[T, N] alias:
+        Array[int, 60]([0] * 60)   # from a list
+        Array[int, 3](0, 1, 2)     # variadic args
+        Array[int, 4]()            # zero-initialized
+    """
+
+    def __init__(self, alias: "_ArrayAlias", values: list) -> None:
+        if len(values) != alias.size:
+            raise ValueError(
+                f"Array[{alias.dtype.__name__}, {alias.size}] requires exactly "
+                f"{alias.size} elements, got {len(values)}"
+            )
+        self._values = list(values)
+        self._alias = alias
+
+    def __getitem__(self, idx: int):
+        return self._values[idx]
+
+    def __setitem__(self, idx: int, val) -> None:
+        self._values[idx] = val
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __repr__(self) -> str:
+        return f"Array[{self._alias.dtype.__name__}, {self._alias.size}]{self._values!r}"
+
 
 @dataclass(frozen=True)
 class _ArrayAlias:
@@ -27,6 +63,23 @@ class _ArrayAlias:
 
     dtype: type  # int, float, or bool
     size: int
+
+    def __call__(self, *args) -> ArrayInstance:
+        """Create an ArrayInstance with the given values.
+
+        Args:
+            *args: No args (zero-initialized), one iterable arg, or N scalar args.
+
+        Returns:
+            ArrayInstance with validated size.
+        """
+        if len(args) == 0:
+            values = [_DTYPE_DEFAULT[self.dtype]] * self.size
+        elif len(args) == 1 and hasattr(args[0], "__iter__"):
+            values = list(args[0])
+        else:
+            values = list(args)
+        return ArrayInstance(self, values)
 
 
 class Array:
@@ -116,4 +169,12 @@ def get_tiling_fields(cls: type) -> dict[str, FieldInfo]:
     return result
 
 
-__all__ = ["is_tiling_class", "get_tiling_fields", "Array", "ScalarFieldInfo", "ArrayFieldInfo", "FieldInfo"]
+__all__ = [
+    "is_tiling_class",
+    "get_tiling_fields",
+    "Array",
+    "ArrayInstance",
+    "ScalarFieldInfo",
+    "ArrayFieldInfo",
+    "FieldInfo",
+]
