@@ -1180,7 +1180,10 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "system.sync_dst")
 REGISTER_BACKEND_OP(Backend910B_CCE, "system.bar_v")
     .set_pipe(ir::PipeType::S)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
-      dynamic_cast<codegen::CCECodegen&>(codegen_base).Emit("pipe_barrier(PIPE_V);");
+      auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+      if (codegen.GetArch() == "a3") {
+        dynamic_cast<codegen::CCECodegen&>(codegen_base).Emit("pipe_barrier(PIPE_V);");
+      }
       return "";
     });
 
@@ -1217,11 +1220,11 @@ static std::string MakeCrossCoreSetCodegenCCE(const ir::CallPtr& op, codegen::Co
     if (is_dynamic) {
       std::string event_id = codegen.GetExprAsCode(op->args_[0]);
       codegen.Emit("set_intra_block(" + pipe_str + ", " + event_id + ");");
-      codegen.Emit("set_intra_block(" + pipe_str + ", " + event_id + " + 16);");
+      // codegen.Emit("set_intra_block(" + pipe_str + ", " + event_id + " + 16);");
     } else {
       int event_id = op->GetKwarg<int>("event_id");
       codegen.Emit("set_intra_block(" + pipe_str + ", " + std::to_string(event_id) + ");");
-      codegen.Emit("set_intra_block(" + pipe_str + ", " + std::to_string(event_id + 16) + ");");
+      // codegen.Emit("set_intra_block(" + pipe_str + ", " + std::to_string(event_id + 16) + ");");
     }
   } else {
     if (is_dynamic) {

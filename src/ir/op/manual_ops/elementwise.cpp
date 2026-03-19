@@ -129,8 +129,55 @@ REGISTER_MANUAL_BINARY_TILE(and);
 REGISTER_MANUAL_BINARY_TILE(or);
 REGISTER_MANUAL_BINARY_TILE(shl);
 REGISTER_MANUAL_BINARY_TILE(shr);
+REGISTER_MANUAL_BINARY_TILE(add_relu);
+REGISTER_MANUAL_BINARY_TILE(sub_relu);
+REGISTER_MANUAL_BINARY_TILE(mul_add_dst);
+REGISTER_MANUAL_BINARY_TILE(fused_mul_add);
+REGISTER_MANUAL_BINARY_TILE(fused_mul_add_relu);
 
 #undef REGISTER_MANUAL_BINARY_TILE
+
+// manual.add_relu_cast: (lhs_tile, rhs_tile, out) -> out's type; carries target_type and mode attrs.
+REGISTER_OP("manual.add_relu_cast")
+    .set_op_category("ManualOp")
+    .set_description("Manual add-relu-cast: out = cast(max(0, lhs + rhs), target_dtype, rounding_mode)")
+    .add_argument("lhs", "Left tile (TileType)")
+    .add_argument("rhs", "Right tile (TileType)")
+    .add_argument("out", "Pre-allocated output tile with target dtype (TileType)")
+    .set_attr<DataType>("target_type")
+    .set_attr<std::string>("mode")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceManualBinaryTile(args, kwargs, "manual.add_relu_cast");
+    });
+
+// manual.sub_relu_cast: (lhs_tile, rhs_tile, out) -> out's type; carries target_type and mode attrs.
+REGISTER_OP("manual.sub_relu_cast")
+    .set_op_category("ManualOp")
+    .set_description("Manual sub-relu-cast: out = cast(max(0, lhs - rhs), target_dtype, rounding_mode)")
+    .add_argument("lhs", "Left tile (TileType)")
+    .add_argument("rhs", "Right tile (TileType)")
+    .add_argument("out", "Pre-allocated output tile with target dtype (TileType)")
+    .set_attr<DataType>("target_type")
+    .set_attr<std::string>("mode")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceManualBinaryTile(args, kwargs, "manual.sub_relu_cast");
+    });
+
+// manual.mul_cast: (lhs_tile, rhs_tile, out) -> out's type; carries target_type and mode attrs.
+REGISTER_OP("manual.mul_cast")
+    .set_op_category("ManualOp")
+    .set_description("Manual mul-cast: out = cast(lhs * rhs, target_dtype_dtype, rounding_mode)")
+    .add_argument("lhs", "Left tile (TileType)")
+    .add_argument("rhs", "Right tile (TileType)")
+    .add_argument("out", "Pre-allocated output tile with target dtype (TileType)")
+    .set_attr<DataType>("target_type")
+    .set_attr<std::string>("mode")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceManualBinaryTile(args, kwargs, "manual.mul_cast");
+    });
 
 // ---------------------------------------------------------------------------
 // Tile x Scalar binary operations
@@ -162,6 +209,37 @@ REGISTER_MANUAL_BINARY_SCALAR(mins);
 REGISTER_MANUAL_BINARY_SCALAR(lrelu);
 
 #undef REGISTER_MANUAL_BINARY_SCALAR
+
+// manual.gather: (src_tile, indices_tile, out) or (src_tile, indices_tile, tmp, out) -> out's type
+REGISTER_OP("manual.gather")
+    .set_op_category("ManualOp")
+    .set_description("Manual gather: out[i] = src[indices[i]]")
+    .add_argument("src", "Source tile (TileType)")
+    .add_argument("indices", "Index tile (TileType)")
+    .add_argument("out", "Pre-allocated output tile (TileType)")
+    .add_argument("tmp", "Optional temporary tile for index gather (TileType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      if (args.size() == 3) {
+        return DeduceManualOutType(args, kwargs, "manual.gather", 3);
+      } else if (args.size() == 4) {
+        return DeduceManualOutType(args, kwargs, "manual.gather", 4);
+      } else {
+        throw std::runtime_error("manual.gather: expected 3 or 4 args (src, indices, out) or (src, indices, tmp, out)");
+      }
+    });
+
+// manual.gatherb: (src_tile, offsets_tile, out) -> out's type
+REGISTER_OP("manual.gatherb")
+    .set_op_category("ManualOp")
+    .set_description("Manual gatherb: out[i] = src[byte_offsets[i]]")
+    .add_argument("src", "Source tile (TileType)")
+    .add_argument("offsets", "Byte offset tile (TileType)")
+    .add_argument("out", "Pre-allocated output tile (TileType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceManualOutType(args, kwargs, "manual.gatherb", 3);
+    });
 
 // ---------------------------------------------------------------------------
 // Unary operations

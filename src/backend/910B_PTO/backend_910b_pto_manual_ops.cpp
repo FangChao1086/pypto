@@ -103,6 +103,110 @@ static std::string GenerateManualInsOutsClause(const CallPtr& op, codegen::PTOCo
   return oss.str();
 }
 
+static std::string GenerateManualInsMidOutsClause(const CallPtr& op, codegen::PTOCodegen& codegen,
+                                                  size_t n_ins,
+                                                  const std::string& config_attr = "") {
+  CHECK(op->args_.size() == n_ins + 1)
+      << "GenerateManualInsMidOutsClause: expected " << (n_ins + 1) << " args, got "
+      << op->args_.size();
+
+  std::ostringstream oss;
+
+  // --- ins clause ---
+  oss << "ins(";
+  for (size_t i = 0; i < n_ins; ++i) {
+    if (i > 0) oss << ", ";
+    oss << codegen.GetExprAsCode(op->args_[i]);
+  }
+  // type annotations
+  std::string type_annot;
+  for (size_t i = 0; i < n_ins; ++i) {
+    std::string annot = codegen.GetExprTypeAnnotation(op->args_[i]);
+    if (!annot.empty()) {
+      if (!type_annot.empty()) type_annot += ", ";
+      type_annot += annot;
+    }
+  }
+  if (!type_annot.empty()) oss << " : " << type_annot;
+  if (!config_attr.empty()) oss << config_attr;
+
+  // --- outs clause (explicit last arg) ---
+  const size_t out_idx = 0;
+  std::string out_name = codegen.GetExprAsCode(op->args_[out_idx]);
+  std::string out_type = codegen.GetExprTypeAnnotation(op->args_[out_idx]);
+  oss << ") outs(" << out_name;
+  if (!out_type.empty()) oss << " : " << out_type;
+  oss << ")";
+
+  return oss.str();
+}
+
+static std::string GenerateManualMixSelfInsOutsClause(const CallPtr& op, codegen::PTOCodegen& codegen,
+                                                      size_t n_ins, size_t out_ins,
+                                                      const std::string& config_attr = "") {
+  CHECK(op->args_.size() == n_ins + 1)
+      << "GenerateManualInsMidOutsClause: expected " << (n_ins + 1) << " args, got "
+      << op->args_.size();
+
+  std::ostringstream oss;
+
+  // --- ins clause ---
+  oss << "ins(";
+  for (size_t i = 0; i < n_ins + 1; i+=2) {
+    if (i > 0) oss << ", ";
+    oss << codegen.GetExprAsCode(op->args_[i]);
+  }
+  // type annotations
+  std::string type_annot;
+  for (size_t i = 0; i < n_ins; ++i) {
+    std::string annot = codegen.GetExprTypeAnnotation(op->args_[i]);
+    if (!annot.empty()) {
+      if (!type_annot.empty()) type_annot += ", ";
+      type_annot += annot;
+    }
+  }
+  if (!type_annot.empty()) oss << " : " << type_annot;
+  if (!config_attr.empty()) oss << config_attr;
+
+  // --- outs clause (explicit last arg) ---
+  const size_t out_idx = out_ins;
+  std::string out_name = codegen.GetExprAsCode(op->args_[out_idx]);
+  std::string out_type = codegen.GetExprTypeAnnotation(op->args_[out_idx]);
+  oss << ") outs(" << out_name;
+  if (!out_type.empty()) oss << " : " << out_type;
+  oss << ")";
+
+  return oss.str();
+}
+
+static std::string GenerateManualMixInsOutsClause(const CallPtr& op, codegen::PTOCodegen& codegen,
+                                                  size_t n_ins,
+                                                  const std::string& config_attr = "") {
+  std::ostringstream oss;
+
+  // --- ins clause ---
+  oss << "ins(";
+  oss << codegen.GetExprAsCode(op->args_[0]);
+  if (!config_attr.empty()) oss << config_attr;
+  // type annotations
+  std::string type_annot;
+  std::string annot = codegen.GetExprTypeAnnotation(op->args_[0]);
+  if (!annot.empty()) {
+    if (!type_annot.empty()) type_annot += ", ";
+    type_annot += annot;
+  }
+  if (!type_annot.empty()) oss << " : " << type_annot;
+  // --- outs clause (explicit last arg) ---
+  const size_t out_idx = n_ins;
+  std::string out_name = codegen.GetExprAsCode(op->args_[out_idx]);
+  std::string out_type = codegen.GetExprTypeAnnotation(op->args_[out_idx]);
+  oss << ") outs(" << out_name;
+  if (!out_type.empty()) oss << " : " << out_type;
+  oss << ")";
+
+  return oss.str();
+}
+
 // ============================================================================
 // Arity-specific convenience wrappers
 // ============================================================================
@@ -123,6 +227,84 @@ static std::string MakeManualBinaryPTO(const std::string& pto_op, const CallPtr&
   CHECK(op->args_.size() == 3) << pto_op << ": expected 3 args (lhs, rhs, out), got "
                                << op->args_.size();
   codegen.Emit(pto_op + " " + GenerateManualInsOutsClause(op, codegen, 2));
+  return "";
+}
+
+// Mix Binary: (lhs, rhs, out)
+static std::string MakeManualMixBinaryPTO(const std::string& pto_op1, const std::string& pto_op2,
+                                          const CallPtr& op, codegen::CodegenBase& cb) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(cb);
+  CHECK(op->args_.size() == 3) << pto_op1 << ": expected 3 args (lhs, rhs, out), got "
+                                << op->args_.size();
+  codegen.Emit(pto_op1 + " " + GenerateManualInsMidOutsClause(op, codegen, 2));
+  codegen.Emit(pto_op2 + " " + GenerateManualMixInsOutsClause(op, codegen, 2));
+  return "";
+}
+
+// Mix Self Binary: (lhs, rhs, out)
+static std::string MakeManualMixSelfBinaryPTO(const std::string& pto_op1, const std::string& pto_op2,
+                                          const CallPtr& op, codegen::CodegenBase& cb) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(cb);
+  CHECK(op->args_.size() == 3) << pto_op1 << ": expected 3 args (lhs, rhs, out), got "
+                                << op->args_.size();
+  codegen.Emit(pto_op1 + " " + GenerateManualInsMidOutsClause(op, codegen, 2));
+  codegen.Emit(pto_op2 + " " + GenerateManualMixSelfInsOutsClause(op, codegen, 2, 2));
+  return "";
+}
+
+// Mix Binary Swap: (lhs, rhs, out) - lhs used in both ops, rhs used in second op
+// Generates: pto_op1(lhs, out, out), pto_op2(rhs, out, out)
+static std::string MakeManualMixFusedBinaryPTO(const std::string& pto_op1, const std::string& pto_op2,
+                                          const CallPtr& op, codegen::CodegenBase& cb) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(cb);
+  CHECK(op->args_.size() == 3) << pto_op1 << ": expected 3 args (lhs, rhs, out), got "
+                                << op->args_.size();
+  codegen.Emit(pto_op1 + " " + GenerateManualMixSelfInsOutsClause(op, codegen, 2, 0));
+  codegen.Emit(pto_op2 + " " + GenerateManualInsOutsClause(op, codegen, 2));
+  return "";
+}
+
+// Mix Binary Swap with ReLU: (lhs, rhs, out) - lhs used in both ops, rhs used in second op, then ReLU
+// Generates: pto_op1(lhs, out, out), pto_op2(rhs, out, out), pto_op3(out, out)
+static std::string MakeManualMixFusedReluBinaryReluPTO(const std::string& pto_op1, const std::string& pto_op2,
+                                          const std::string& pto_op3, const CallPtr& op,
+                                          codegen::CodegenBase& cb) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(cb);
+  CHECK(op->args_.size() == 3) << pto_op1 << ": expected 3 args (lhs, rhs, out), got "
+                                << op->args_.size();
+  codegen.Emit(pto_op1 + " " + GenerateManualMixSelfInsOutsClause(op, codegen, 2, 0));
+  codegen.Emit(pto_op2 + " " + GenerateManualInsMidOutsClause(op, codegen, 2));
+  codegen.Emit(pto_op3 + " " + GenerateManualMixInsOutsClause(op, codegen, 2));
+  return "";
+}
+
+// Mix Binary with Cast: (lhs, rhs, out) + target_type, mode kwargs
+// Generates: pto_op1(lhs, rhs, out), pto_op2(out, out), pto_op3cvt(out, out) with cast attributes
+static std::string MakeManualMixBinaryCvtPTO(const std::string& pto_op1, const std::string& pto_op2,
+                                             const std::string& pto_op3cvt, const CallPtr& op,
+                                             codegen::CodegenBase& cb) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(cb);
+  CHECK(op->args_.size() == 3) << pto_op1 << ": expected 3 args (lhs, rhs, out), got "
+                               << op->args_.size();
+  
+  // Step 1: First binary op (e.g., pto.tadd)
+  codegen.Emit(pto_op1 + " " + GenerateManualInsMidOutsClause(op, codegen, 2));
+  
+  // Step 2: Second unary op (e.g., pto.trelu)
+  codegen.Emit(pto_op2 + " " + GenerateManualMixInsOutsClause(op, codegen, 0));
+  
+  // Step 3: Cast op with mode attribute
+  const std::string& mode_str = op->GetKwarg<std::string>("mode");
+  static const std::vector<std::string> kModeNames = {"none", "rint",  "round", "floor",
+                                                      "ceil", "trunc", "odd",   "cast_rint"};
+  int mode_idx = -1;
+  for (int i = 0; i < static_cast<int>(kModeNames.size()); ++i) {
+    if (kModeNames[i] == mode_str) { mode_idx = i; break; }
+  }
+  CHECK(mode_idx >= 0) << pto_op3cvt << ": unknown round mode '" << mode_str << "'";
+  std::string attr = "{rmode = #pto<round_mode " + kManualRoundModes.at(mode_idx) + ">}";
+  codegen.Emit(pto_op3cvt + " " + GenerateManualMixInsOutsClause(op, codegen, 2, attr));
+  
   return "";
 }
 
@@ -188,6 +370,32 @@ static std::string MakeManualCvtPTO(const std::string& pto_op, const CallPtr& op
   CHECK(mode_idx >= 0) << pto_op << ": unknown round mode '" << mode_str << "'";
   std::string attr = "{rmode = #pto<round_mode " + kManualRoundModes.at(mode_idx) + ">}";
   codegen.Emit(pto_op + " " + GenerateManualInsOutsClause(op, codegen, 1, attr));
+  return "";
+}
+
+// Binary with Cast: (lhs, rhs, out) + target_type, mode kwargs
+// Generates: pto_op1(lhs, rhs, out), pto_op2cvt(out, out) with cast attributes
+static std::string MakeManualBinaryCvtPTO(const std::string& pto_op1, const std::string& pto_op2cvt,
+                                          const CallPtr& op, codegen::CodegenBase& cb) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(cb);
+  CHECK(op->args_.size() == 3) << pto_op1 << ": expected 3 args (lhs, rhs, out), got "
+                               << op->args_.size();
+  
+  // Step 1: First binary op (e.g., pto.tmul)
+  codegen.Emit(pto_op1 + " " + GenerateManualInsMidOutsClause(op, codegen, 2));
+  
+  // Step 2: Cast op with mode attribute
+  const std::string& mode_str = op->GetKwarg<std::string>("mode");
+  static const std::vector<std::string> kModeNames = {"none", "rint",  "round", "floor",
+                                                      "ceil", "trunc", "odd",   "cast_rint"};
+  int mode_idx = -1;
+  for (int i = 0; i < static_cast<int>(kModeNames.size()); ++i) {
+    if (kModeNames[i] == mode_str) { mode_idx = i; break; }
+  }
+  CHECK(mode_idx >= 0) << pto_op2cvt << ": unknown round mode '" << mode_str << "'";
+  std::string attr = "{rmode = #pto<round_mode " + kManualRoundModes.at(mode_idx) + ">}";
+  codegen.Emit(pto_op2cvt + " " + GenerateManualMixInsOutsClause(op, codegen, 2, attr));
+  
   return "";
 }
 
@@ -541,6 +749,53 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "manual.shr")
       return MakeManualBinaryPTO("pto.tshr", op, codegen);
     });
 
+REGISTER_BACKEND_OP(Backend910B_PTO, "manual.add_relu")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualMixBinaryPTO("pto.tadd", "pto.trelu", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "manual.sub_relu")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualMixBinaryPTO("pto.tsub", "pto.trelu", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "manual.add_relu_cast")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualMixBinaryCvtPTO("pto.tadd", "pto.trelu", "pto.tcvt", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "manual.sub_relu_cast")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualMixBinaryCvtPTO("pto.tsub", "pto.trelu", "pto.tcvt", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "manual.mul_cast")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualBinaryCvtPTO("pto.tmul", "pto.tcvt", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "manual.mul_add_dst")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualMixSelfBinaryPTO("pto.tmul", "pto.tadd", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "manual.fused_mul_add")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualMixFusedBinaryPTO("pto.tmul", "pto.tadd", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "manual.fused_mul_add_relu")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualMixFusedReluBinaryReluPTO("pto.tmul", "pto.tadd", "pto.trelu", op, codegen);
+    });
 // ----------------------------------------------------------------------------
 // Tile x Scalar binary
 // ----------------------------------------------------------------------------
@@ -931,6 +1186,36 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "manual.transpose")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeManualUnaryPTO("pto.ttrans", op, codegen);
+    });
+  
+// Gather: (src, indices, out) or (src, indices, tmp, out)
+static std::string MakeManualGatherPTO(const std::string& pto_op, const CallPtr& op,
+                                       codegen::CodegenBase& cb) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(cb);
+  CHECK(op->args_.size() == 2 || op->args_.size() == 4)
+      << "manual.gather: expected 3 or 4 args (src, indices, out) or (src, indices, tmp, out), got "
+      << op->args_.size();
+
+  if (op->args_.size() == 2) {
+    // Index gather without tmp: pto.tgather ins(%src, %indices) outs(%dst)
+    codegen.Emit(pto_op + " " + GenerateManualInsOutsClause(op, codegen, 1));
+  } else {
+    // Index gather with tmp: pto.tgather ins(%src, %indices, %tmp) outs(%dst)
+    codegen.Emit(pto_op + " " + GenerateManualInsOutsClause(op, codegen, 3));
+  }
+  return "";
+}
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "manual.gather")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualGatherPTO("pto.tgather", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "manual.gatherb")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualBinaryPTO("pto.tgatherb", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "manual.set_validshape")

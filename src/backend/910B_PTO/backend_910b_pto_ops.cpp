@@ -1423,7 +1423,11 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "system.sync_dst_dyn")
 // Barrier operations
 static std::string MakeBarVCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  codegen.Emit("pto.barrier #pto.pipe<PIPE_V>");
+  const char* arch = std::getenv("npu_arch");
+  std::string arch_val(arch);
+  if (arch_val == "dav-c220") {
+    codegen.Emit("pto.barrier #pto.pipe<PIPE_V>");
+  }
   return "";
 }
 

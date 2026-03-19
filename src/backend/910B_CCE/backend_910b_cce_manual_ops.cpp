@@ -402,6 +402,184 @@ static std::string MakeManualRowExpandUnaryCodegenCCE(const ir::CallPtr& op,
 }
 
 // ============================================================================
+// Helper: Manual ternary op — args = [a, b, c, dst]
+// Emits: OP(dst, a, b, c);
+// ============================================================================
+static std::string MakeManualTernaryCodegenCCE(const std::string& cce_op_name, const ir::CallPtr& op,
+                                               codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 4) << cce_op_name << ": expected 4 args (a, b, c, dst), got " << op->args_.size();
+  std::string a   = codegen.GetExprAsCode(op->args_[0]);
+  std::string b   = codegen.GetExprAsCode(op->args_[1]);
+  std::string c   = codegen.GetExprAsCode(op->args_[2]);
+  std::string dst = codegen.GetExprAsCode(op->args_[3]);
+  codegen.Emit(cce_op_name + "(" + dst + ", " + a + ", " + b + ", " + c + ");");
+  return "";
+}
+
+// ============================================================================
+// Helper: Manual quaternary op — args = [a, b, c, d, dst]
+// Emits: OP(dst, a, b, c, d);
+// ============================================================================
+static std::string MakeManualQuaternaryCodegenCCE(const std::string& cce_op_name, const ir::CallPtr& op,
+                                                  codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 5) << cce_op_name << ": expected 5 args (a, b, c, d, dst), got " << op->args_.size();
+  std::string a   = codegen.GetExprAsCode(op->args_[0]);
+  std::string b   = codegen.GetExprAsCode(op->args_[1]);
+  std::string c   = codegen.GetExprAsCode(op->args_[2]);
+  std::string d   = codegen.GetExprAsCode(op->args_[3]);
+  std::string dst = codegen.GetExprAsCode(op->args_[4]);
+  codegen.Emit(cce_op_name + "(" + dst + ", " + a + ", " + b + ", " + c + ", " + d + ");");
+  return "";
+}
+
+// ============================================================================
+// Helper: Binary + ReLU — args = [lhs, rhs, dst]
+// Semantics: dst = max(0, OP(lhs, rhs))
+// Emits: OP(lhs, lhs, rhs); TRELU(dst, lhs);
+// ============================================================================
+static std::string MakeManualBinaryReluCodegenCCE(const std::string& cce_op_name, const ir::CallPtr& op,
+                                                   codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << cce_op_name << "+relu: expected 3 args (lhs, rhs, dst), got " << op->args_.size();
+  std::string lhs = codegen.GetExprAsCode(op->args_[0]);
+  std::string rhs = codegen.GetExprAsCode(op->args_[1]);
+  std::string dst = codegen.GetExprAsCode(op->args_[2]);
+  codegen.Emit(cce_op_name + "(" + lhs + ", " + lhs + ", " + rhs + ");");
+  codegen.Emit("TRELU(" + dst + ", " + lhs + ");");
+  return "";
+}
+
+// ============================================================================
+// Helper: Binary + ReLU + Cast — args = [lhs, rhs, dst] + mode kwarg
+// Semantics: dst = cast(max(0, OP(lhs, rhs)), mode)
+// Emits: OP(lhs, lhs, rhs); TRELU(lhs, lhs); TCVT(dst, lhs, mode);
+// ============================================================================
+static std::string MakeManualBinaryReluCastCodegenCCE(const std::string& cce_op_name, const ir::CallPtr& op,
+                                                       codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << cce_op_name << "+relu+cast: expected 3 args (lhs, rhs, dst), got " << op->args_.size();
+  std::string lhs = codegen.GetExprAsCode(op->args_[0]);
+  std::string rhs = codegen.GetExprAsCode(op->args_[1]);
+  std::string dst = codegen.GetExprAsCode(op->args_[2]);
+  const std::string& mode_str = op->GetKwarg<std::string>("mode");
+  static const std::vector<std::string> kModeNames = {"none", "rint", "round", "floor",
+                                                       "ceil", "trunc", "odd", "cast_rint"};
+  int mode_idx = -1;
+  for (int i = 0; i < static_cast<int>(kModeNames.size()); ++i) {
+    if (kModeNames[i] == mode_str) { mode_idx = i; break; }
+  }
+  CHECK(mode_idx >= 0) << cce_op_name << "+relu+cast: unknown round mode '" << mode_str << "'";
+  codegen.Emit(cce_op_name + "(" + lhs + ", " + lhs + ", " + rhs + ");");
+  codegen.Emit("TRELU(" + lhs + ", " + lhs + ");");
+  codegen.Emit("TCVT(" + dst + ", " + lhs + ", " +
+               codegen.GetTypeConverter().ConvertCastRoundMode(mode_idx) + ");");
+  return "";
+}
+
+// ============================================================================
+// Helper: Binary + Cast — args = [lhs, rhs, dst] + mode kwarg
+// Semantics: dst = cast(OP(lhs, rhs), mode)
+// Emits: OP(lhs, lhs, rhs); TCVT(dst, lhs, mode);
+// ============================================================================
+static std::string MakeManualBinaryCastCodegenCCE(const std::string& cce_op_name, const ir::CallPtr& op,
+                                                   codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << cce_op_name << "+cast: expected 3 args (lhs, rhs, dst), got " << op->args_.size();
+  std::string lhs = codegen.GetExprAsCode(op->args_[0]);
+  std::string rhs = codegen.GetExprAsCode(op->args_[1]);
+  std::string dst = codegen.GetExprAsCode(op->args_[2]);
+  const std::string& mode_str = op->GetKwarg<std::string>("mode");
+  static const std::vector<std::string> kModeNames = {"none", "rint", "round", "floor",
+                                                       "ceil", "trunc", "odd", "cast_rint"};
+  int mode_idx = -1;
+  for (int i = 0; i < static_cast<int>(kModeNames.size()); ++i) {
+    if (kModeNames[i] == mode_str) { mode_idx = i; break; }
+  }
+  CHECK(mode_idx >= 0) << cce_op_name << "+cast: unknown round mode '" << mode_str << "'";
+  codegen.Emit(cce_op_name + "(" + lhs + ", " + lhs + ", " + rhs + ");");
+  codegen.Emit("TCVT(" + dst + ", " + lhs + ", " +
+               codegen.GetTypeConverter().ConvertCastRoundMode(mode_idx) + ");");
+  return "";
+}
+
+// ============================================================================
+// manual.mul_add_dst — args = [lhs, rhs, out]
+// Semantics: out = (lhs * rhs) + out
+// Emits: TMUL(lhs, lhs, rhs); TADD(out, lhs, out);
+// ============================================================================
+static std::string MakeManualMulAddDstCodegenCCE(const ir::CallPtr& op,
+                                                  codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "manual.mul_add_dst: expected 3 args (lhs, rhs, out), got " << op->args_.size();
+  std::string lhs = codegen.GetExprAsCode(op->args_[0]);
+  std::string rhs = codegen.GetExprAsCode(op->args_[1]);
+  std::string out = codegen.GetExprAsCode(op->args_[2]);
+  codegen.Emit("TMUL(" + lhs + ", " + lhs + ", " + rhs + ");");
+  codegen.Emit("TADD(" + out + ", " + lhs + ", " + out + ");");
+  return "";
+}
+
+// ============================================================================
+// manual.fused_mul_add — args = [lhs, rhs, out]
+// Semantics: out = (lhs * out) + rhs
+// Emits: TMUL(lhs, lhs, out); TADD(out, lhs, rhs);
+// ============================================================================
+static std::string MakeManualFusedMulAddCodegenCCE(const ir::CallPtr& op,
+                                                    codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "manual.fused_mul_add: expected 3 args (lhs, rhs, out), got " << op->args_.size();
+  std::string lhs = codegen.GetExprAsCode(op->args_[0]);
+  std::string rhs = codegen.GetExprAsCode(op->args_[1]);
+  std::string out = codegen.GetExprAsCode(op->args_[2]);
+  codegen.Emit("TMUL(" + lhs + ", " + lhs + ", " + out + ");");
+  codegen.Emit("TADD(" + out + ", " + lhs + ", " + rhs + ");");
+  return "";
+}
+
+// ============================================================================
+// manual.fused_mul_add_relu — args = [lhs, rhs, out]
+// Semantics: out = max(0, (lhs * out) + rhs)
+// Emits: TMUL(lhs, lhs, out); TADD(lhs, lhs, rhs); TRELU(out, lhs);
+// ============================================================================
+static std::string MakeManualFusedMulAddReluCodegenCCE(const ir::CallPtr& op,
+                                                        codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "manual.fused_mul_add_relu: expected 3 args (lhs, rhs, out), got " << op->args_.size();
+  std::string lhs = codegen.GetExprAsCode(op->args_[0]);
+  std::string rhs = codegen.GetExprAsCode(op->args_[1]);
+  std::string out = codegen.GetExprAsCode(op->args_[2]);
+  codegen.Emit("TMUL(" + lhs + ", " + lhs + ", " + out + ");");
+  codegen.Emit("TADD(" + lhs + ", " + lhs + ", " + rhs + ");");
+  codegen.Emit("TRELU(" + out + ", " + lhs + ");");
+  return "";
+}
+
+// ============================================================================
+// manual.gather — args = [src, indices, out] or [src, indices, tmp, out]
+// Emits: TGATHER(out, src, indices) or TGATHER(out, src, indices, tmp);
+// ============================================================================
+static std::string MakeManualGatherCodegenCCE(const ir::CallPtr& op,
+                                               codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  if (op->args_.size() == 3) {
+    std::string src     = codegen.GetExprAsCode(op->args_[0]);
+    std::string indices = codegen.GetExprAsCode(op->args_[1]);
+    std::string out     = codegen.GetExprAsCode(op->args_[2]);
+    codegen.Emit("TGATHER(" + out + ", " + src + ", " + indices + ");");
+  } else {
+    CHECK(op->args_.size() == 4) << "manual.gather: expected 3 or 4 args, got " << op->args_.size();
+    std::string src     = codegen.GetExprAsCode(op->args_[0]);
+    std::string indices = codegen.GetExprAsCode(op->args_[1]);
+    std::string tmp     = codegen.GetExprAsCode(op->args_[2]);
+    std::string out     = codegen.GetExprAsCode(op->args_[3]);
+    codegen.Emit("TGATHER(" + out + ", " + src + ", " + indices + ", " + tmp + ");");
+  }
+  return "";
+}
+
+// ============================================================================
 // Op registrations — Memory
 // ============================================================================
 
@@ -527,6 +705,54 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "manual.shr")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeManualBinaryCodegenCCE("TSHR", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.add_relu")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualBinaryReluCodegenCCE("TADD", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.sub_relu")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualBinaryReluCodegenCCE("TSUB", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.add_relu_cast")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualBinaryReluCastCodegenCCE("TADD", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.sub_relu_cast")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualBinaryReluCastCodegenCCE("TSUB", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.mul_cast")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualBinaryCastCodegenCCE("TMUL", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.mul_add_dst")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualMulAddDstCodegenCCE(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.fused_mul_add")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualFusedMulAddCodegenCCE(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.fused_mul_add_relu")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualFusedMulAddReluCodegenCCE(op, codegen);
     });
 
 // ============================================================================
@@ -791,6 +1017,30 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "manual.matmul_acc")
       return MakeManualMatmulAccCodegenCCE(op, codegen);
     });
 
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.matmul_bias")
+    .set_pipe(ir::PipeType::M)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualQuaternaryCodegenCCE("TMATMUL_BIAS", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.gemv")
+    .set_pipe(ir::PipeType::M)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualBinaryCodegenCCE("TGEMV", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.gemv_acc")
+    .set_pipe(ir::PipeType::M)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualTernaryCodegenCCE("TGEMV_ACC", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.gemv_bias")
+    .set_pipe(ir::PipeType::M)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualTernaryCodegenCCE("TGEMV_BIAS", op, codegen);
+    });
+
 // ============================================================================
 // Op registrations — Layout operations
 // ============================================================================
@@ -805,6 +1055,80 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "manual.transpose")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeManualTransposeCodegenCCE(op, codegen);
+    });
+
+// ============================================================================
+// Op registrations — Ternary / multi-input
+// ============================================================================
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.xor")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualTernaryCodegenCCE("TXOR", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.xors")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualTernaryCodegenCCE("TXORS", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.prelu")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualTernaryCodegenCCE("TPRELU", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.addc")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualTernaryCodegenCCE("TADDC", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.subc")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualTernaryCodegenCCE("TSUBC", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.addsc")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualTernaryCodegenCCE("TADDSC", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.subsc")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualTernaryCodegenCCE("TSUBSC", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.sel")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualTernaryCodegenCCE("TSEL", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.sels")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualTernaryCodegenCCE("TSELS", op, codegen);
+    });
+
+// ============================================================================
+// Op registrations — Gather / scatter
+// ============================================================================
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.gather")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualGatherCodegenCCE(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.gatherb")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualBinaryCodegenCCE("TGATHERB", op, codegen);
     });
 
 // ============================================================================

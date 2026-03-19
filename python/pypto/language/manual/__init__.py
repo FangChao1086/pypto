@@ -121,6 +121,16 @@ from .op.manual_ops import (
     ub_copy,
     xor,
     xors,
+    add_relu,
+    sub_relu,
+    add_relu_cast,
+    sub_relu_cast,
+    mul_cast,
+    mul_add_dst,
+    fused_mul_add,
+    fused_mul_add_relu,
+    gather,
+    gatherb,
 )
 
 # Re-export DataType constants for convenience
@@ -156,7 +166,8 @@ __all__ = [
     "load", "load_tile", "store", "store_tile", "l0c_store", "move", "ub_copy", "full", "fillpad", "get_block_idx", "get_subblock_idx",
     # Tile x Tile binary
     "add", "sub", "mul", "div", "rem", "maximum", "minimum",
-    "and_", "or_", "shl", "shr",
+    "and_", "or_", "shl", "shr", "add_relu", "sub_relu", "add_relu_cast", "sub_relu_cast", "mul_cast",
+    "mul_add_dst", "fused_mul_add", "fused_mul_add_relu",
     # Tile x Scalar binary
     "adds", "subs", "muls", "divs", "rems",
     "ands", "ors", "shls", "shrs",
@@ -167,6 +178,8 @@ __all__ = [
     "xor", "xors", "prelu", "addc", "subc", "addsc", "subsc", "sel", "sels",
     # Comparison
     "cmp", "cmps",
+    #gather
+    "gather", "gatherb",
     # Reduction
     "row_max", "row_sum", "row_min",
     # Broadcast
