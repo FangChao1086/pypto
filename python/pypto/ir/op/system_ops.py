@@ -112,3 +112,49 @@ def bar_m(*, span: Span | None = None) -> Call:
 def bar_all(*, span: Span | None = None) -> Call:
     """Global barrier synchronization."""
     return _create_barrier_op("system.bar_all", span=span)
+
+def set_cross_core(
+    *,
+    pipe: PipeType,
+    event_id: int,
+    span: Span | None = None,
+) -> Call:
+    """Set for a synchronization signal (Cross core).
+
+    Args:
+        pipe: Pipe that sets the flag
+        event_id: Event identifier
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for system.set_cross_core
+    """
+    kwargs = {
+        "pipe": pipe,
+        "event_id": event_id,
+    }
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("system.set_cross_core", [], kwargs, actual_span)
+
+def wait_cross_core(
+    *,
+    pipe: PipeType,
+    event_id: int,
+    span: Span | None = None,
+) -> Call:
+    """Wait for a synchronization signal (Cross core).
+
+    Args:
+        pipe: Pipe that waits the flag
+        event_id: Event identifier
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for system.wait_cross_core
+    """
+    kwargs = {
+        "pipe": pipe,
+        "event_id": event_id,
+    }
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("system.wait_cross_core", [], kwargs, actual_span)

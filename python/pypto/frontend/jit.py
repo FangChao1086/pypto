@@ -372,6 +372,94 @@ def _get_mlir_code(result):
     """Normalize generate() result to MLIR string (support both str and dict)."""
     return result if isinstance(result, str) else "".join(result.values())
 
+def _generate_caller_cpp(
+    kernel_params: list[tuple[str, str, bool]],
+    kernel_cpp_name: str,
+    kernel_name: str,
+    has_cross_core_sync: bool = False
+) -> str:
+    """Generate extern "C" wrapper that calls the __global__ kernel.
+    
+    Args:
+        param_specs: List of parameter specifications extracted from IR
+        kernel_cpp_name: Name of the kernel .cpp file to include
+        kernel_name: Name of the kernel function to call
+        has_cross_core_sync: Whether the kernel uses cross-core sync ops
+    
+    Returns:
+        Generated caller.cpp content as string
+    """
+    cpp_params = []
+    kernel_args = []
+
+    for typ, name, is_ptr in kernel_params:
+        if is_ptr:
+            cpp_params.append(f"uint8_t* {name}")
+            kernel_args.append(f"({typ} *){name}")
+        else:
+            cpp_params.append(f"{typ} {name}")
+            kernel_args.append(name)
+    sig = ", ".join(["uint32_t blockDim", "void* stream"] + cpp_params)
+    call_args = ", ".join(kernel_args)
+
+    if has_cross_core_sync:
+        call_args = f"{call_args}, (int64_t*)ffts" if call_args else "(int64_t*)ffts"
+        return (
+            f'#include "runtime/rt_ffts.h"\n'
+            f'#include "{kernel_cpp_name}"\n'
+            f'extern "C" void call_kernel({sig})\n'
+            "{{\n"
+            "    uint64_t ffts = 0;\n"
+            "    uint32_t fftsLen = 0;\n"
+            "    rtGetC2cCtrlAddr(&ffts, &fftsLen);\n"
+            f"    {kernel_name}<<<blockDim, nullptr, stream>>>({call_args});\n"
+            "}}\n"
+        )
+
+    return (
+        f'#include "{kernel_cpp_name}"\n'
+        f'extern "C" void call_kernel({sig})\n'
+        "{{\n"
+        f"    {kernel_name}<<<blockDim, nullptr, stream>>>({call_args});\n"
+        "}}\n"
+    )
+
+def _inject_set_ffts_to_mlir(mlir_code: str) -> str:
+    """
+    在 MLIR 代码的第一个 func.func 参数列表末尾添加 memref<?xi64> 参数，
+    并在函数体开头插入 pto.set_ffts。
+    使用括号计数定位参数列表的右括号，避免被类型中的尖括号干扰。
+    """
+    func_pattern = re.compile(r'(func\.func\s+@\w+\s*\()')
+    match = func_pattern.search(mlir_code)
+    if not match:
+        return mlir_code
+    start_pos = match.end() - 1
+    pos = start_pos + 1
+    depth = 1
+    while depth > 0 and pos < len(mlir_code):
+        if mlir_code[pos] == '(':
+            depth += 1
+        elif mlir_code[pos] == ')':
+            depth -= 1
+        pos += 1
+    if depth != 0:
+        return mlir_code
+    right_paren_pos = pos - 1
+    param_str = mlir_code[start_pos+1:right_paren_pos]
+    args = re.findall(r'%arg(\d+)', param_str)
+    next_idx = max(int(i) for i in args) + 1 if args else 0
+    new_param = f", %arg{next_idx}: memref<?xi64>" if param_str.strip() else f"%arg{next_idx}: memref<?xi64>"
+    new_param_str = param_str + new_param
+    new_sig = mlir_code[:start_pos+1] + new_param_str + mlir_code[right_paren_pos:]
+    brace_pos = new_sig.find('{', right_paren_pos)
+    if brace_pos == -1:
+        return new_sig
+    # 插入 pto.set_ffts 操作
+    indent = "    "
+    new_op = f"\n{indent}pto.set_ffts %arg{next_idx} : memref<?xi64>"
+    final_code = new_sig[:brace_pos+1] + new_op + new_sig[brace_pos+1:]
+    return final_code
 
 def _normalize_arch(arch: str | None) -> str:
     """Normalize and validate arch names."""
@@ -402,7 +490,7 @@ def _build_bisheng_flags(toolkit_home: str, arch: str) -> list[str]:
     raise ValueError(f"Unsupported arch for _build_bisheng_flags: {arch}")
 
 
-def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220"):
+def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220", has_cross_sync = False):
     """Compile a PTO program to a shared library.
 
     Args:
@@ -422,9 +510,18 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220"):
     final_kernel = "./build/call_kernel.cpp"
     lib_path = "./build/call_kernel.so"
 
+    if "dav-c220" in arch :
+        pto_arch = "a3"
+        os.environ["npu_arch"] = "dav-c220"
+    else :
+        pto_arch = "a5"
+        os.environ["npu_arch"] = "dav-c310"
+
     # step 1, Program -> PtoAs-mlir
     codegen = PTOCodegen()
     mlir_code = _get_mlir_code(codegen.generate(prog))
+    if has_cross_sync :
+        mlir_code = _inject_set_ffts_to_mlir(mlir_code)
     with open(ir_path, "w") as f:
         f.write(mlir_code)
 
@@ -433,7 +530,7 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220"):
     # need https://github.com/zhangstevenunity/PTOAS/issues/10
     # Note: --pto-level=level3 is required for addr operand support
     result = subprocess.run(
-        ["ptoas", ir_path, "--enable-insert-sync", "--pto-level=level3", "-o", raw_cpp_path],
+        ["ptoas", ir_path, "--enable-insert-sync", "--pto-level=level3", f"--pto-arch={pto_arch}", "-o", raw_cpp_path],
         check=False, timeout=timeout, capture_output=True
     )
     if result.returncode != 0:
@@ -444,8 +541,25 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220"):
     # Step 3, preprocess cpp source
     # TODO: should extend `ptoas` emitc to largely replace this ad-doc editing
     content = Path(raw_cpp_path).read_text(encoding="utf-8")
-    edited_content = convert(content=content)
-    Path(final_kernel).write_text(edited_content, encoding="utf-8")
+    kernel_name = None
+    kernel_params = []
+    for line in content.splitlines():
+        if "__global__" in line and "AICORE" in line:
+            parsed = parse_kernel_signature(line, "")
+            if parsed:
+                kernel_name, kernel_params = parsed
+                break
+    if kernel_name is None:
+        raise RuntimeError("Could not find kernel name in generated C++ code")
+    if has_cross_sync :
+        kernel_params = kernel_params[:-1]
+    caller_content = _generate_caller_cpp(
+        kernel_params=kernel_params,
+        kernel_cpp_name="kernel.cpp",
+        kernel_name=kernel_name,
+        has_cross_core_sync=has_cross_sync,
+    )
+    Path(final_kernel).write_text(caller_content, encoding="utf-8")
 
     # Step 4, cpp -> so
     PTO_LIB_PATH = os.environ["ASCEND_TOOLKIT_HOME"]
@@ -457,6 +571,7 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220"):
     runtime_includes = [
         f"-I{ASCEND_HOME_PATH}/include",
         f"-I{ASCEND_HOME_PATH}/pkg_inc/runtime",
+        f"-I{ASCEND_HOME_PATH}/pkg_inc/profiling",
         f"-I{ASCEND_HOME_PATH}/include/experiment/runtime",
         f"-I{ASCEND_HOME_PATH}/include/experiment/msprof",
     ]

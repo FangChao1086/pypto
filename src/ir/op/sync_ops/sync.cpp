@@ -81,5 +81,25 @@ REGISTER_OP("system.bar_all")
     .no_argument()
     .f_deduce_type(DeduceUnknownType);
 
+// Register system.set_cross_core (Set Cross Core Flag)
+// Attributes: pipe, event_id
+REGISTER_OP("system.set_cross_core")
+    .set_description("Set for a synchronization signal (Cross core)")
+    .set_op_category("SyncOp")
+    .no_argument()
+    .set_attr<int>("pipe")
+    .set_attr<int>("event_id")
+    .f_deduce_type(DeduceUnknownType);
+
+// Register system.wait_cross_core (Wait Cross Core Flag)
+// Attributes: pipe, event_id
+REGISTER_OP("system.wait_cross_core")
+    .set_description("Wait for a synchronization signal (Cross core)")
+    .set_op_category("SyncOp")
+    .no_argument()
+    .set_attr<int>("pipe")
+    .set_attr<int>("event_id")
+    .f_deduce_type(DeduceUnknownType);
+
 }  // namespace ir
 }  // namespace pypto

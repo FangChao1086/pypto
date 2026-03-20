@@ -871,6 +871,38 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "system.bar_all")
       return MakeBarAllCodegenPTO(op, codegen);
     });
 
+static std::string MakeSetCrossCoreCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  auto pipe = op->GetKwarg<int>("pipe");
+  auto event_id = op->GetKwarg<int>("event_id");
+  std::ostringstream oss;
+  oss << "pto.sync.set #pto.pipe<PIPE_" << GetPipeTypeName(static_cast<ir::PipeType>(pipe))
+      << ">, " << event_id;
+  codegen.Emit(oss.str());
+  return "";
+}
 
+REGISTER_BACKEND_OP(Backend910B_PTO, "system.set_cross_core")
+    .set_pipe(ir::PipeType::S)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeSetCrossCoreCodegenPTO(op, codegen);
+    });
+
+static std::string MakeWaitCrossCoreCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  auto pipe = op->GetKwarg<int>("pipe");
+  auto event_id = op->GetKwarg<int>("event_id");
+  std::ostringstream oss;
+  oss << "pto.sync.wait #pto.pipe<PIPE_" << GetPipeTypeName(static_cast<ir::PipeType>(pipe))
+      << ">, " << event_id;
+  codegen.Emit(oss.str());
+  return "";
+}
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "system.wait_cross_core")
+    .set_pipe(ir::PipeType::S)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeWaitCrossCoreCodegenPTO(op, codegen);
+    });
 }  // namespace backend
 }  // namespace pypto
