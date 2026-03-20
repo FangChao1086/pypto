@@ -122,6 +122,28 @@ from .op.manual_ops import (
     xors,
 )
 
+from .buffer_policy import (
+    BufferType,
+    SyncType,
+    BuffersPolicyDB,
+    BuffersPolicy3buff,
+    BuffersPolicy4buff,
+    BuffersPolicySingleBuffer,
+)
+
+from .sync import (
+    SyncEvent,
+    inner_core_sync,
+    cross_core_sync_forward,
+    cross_core_sync_both,
+    PipelineType,
+    sync_pipeline,
+    sync_vector,
+    sync_matrix,
+    sync_mte2,
+    sync_mte3,
+)
+
 # Re-export DataType constants for convenience
 FP4 = DataType.FP4
 FP8E4M3FN = DataType.FP8E4M3FN
@@ -182,4 +204,16 @@ __all__ = [
     "INT4", "INT8", "INT16", "INT32", "INT64",
     "UINT4", "UINT8", "UINT16", "UINT32", "UINT64",
     "BOOL", "INDEX",
+    # Buffer policies
+    "BufferType",
+    "SyncType",
+    "BuffersPolicyDB",
+    "BuffersPolicy3buff",
+    "BuffersPolicy4buff",
+    "BuffersPolicySingleBuffer",
+    # Synchronization
+    "SyncEvent",
+    "inner_core_sync",
+    "cross_core_sync_forward",
+    "cross_core_sync_both",
 ]
