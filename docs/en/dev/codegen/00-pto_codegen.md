@@ -486,6 +486,6 @@ Key functions:
 
 ## See Also
 
-- [Pass Manager](../passes/00-pass_manager.md): Understanding pass pipeline
+- [Architecture](../ARCHITECTURE.md): Understanding the pass pipeline
 - [IR Builder](../ir/06-builder.md): Constructing IR programmatically
 - [Operator Organization](../ir/05-operators.md): Block operation details

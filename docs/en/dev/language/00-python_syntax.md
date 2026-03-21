@@ -1,24 +1,73 @@
-# Python IR Syntax Specification
+# Python DSL Syntax Specification
 
 ## Overview
 
-Python-style syntax for PyPTO IR:
+PyPTO provides two programming models:
 
-- **Complete**: All information needed to reconstruct IR
-- **Parseable**: Can be parsed back into IR (see [IR Parser](../ir/07-parser.md))
-- **Pythonic**: Follows Python style, passes most linters
-- **SSA-style**: Uses SSA with `pl.yield_()` and `pl.range()`
+| Model | Import | Memory | Ops return | Use case |
+|-------|--------|--------|------------|----------|
+| **Manual (non-SSA)** | `import pypto.language.manual as plm` | User allocates tiles with explicit addr/size | `None` (write into pre-allocated `out`) | Full control over memory layout and reuse |
+| **SSA** | `import pypto.language as pl` | Compiler-managed | New `Tensor`/`Tile`/`Scalar` | Higher-level, auto-optimized |
+
+**Current focus is the manual model.** Both models share the same type system, decorators, control flow, and system operations from `pypto.language as pl`.
+
+## Quick Start — Manual Matmul with Double Buffer
+
+```python
+import pypto.frontend as fe
+import pypto.language as pl
+import pypto.language.manual as plm
+
+M = pl.DynVar('M')
+K = pl.DynVar('K')
+N = pl.DynVar('N')
+
+@fe.kernel
+def matmul_db(
+    a: pl.Tensor[[M, K], pl.FP16],
+    b: pl.Tensor[[K, N], pl.FP16],
+    c: pl.Tensor[[M, N], pl.FP32],
+) -> pl.Tensor[[M, N], pl.FP32]:
+    # 1. Allocate tiles with explicit address and size
+    tile_type_a = plm.TileType(shape=[128, 128], dtype=pl.FP16,
+                               target_memory=pl.MemorySpace.Mat, blayout=2, slayout=1)
+    tile_a_ping = plm.make_tile(tile_type_a, addr=0x00000, size=32768)
+    tile_a_pong = plm.make_tile(tile_type_a, addr=0x10000, size=32768)
+
+    tile_type_c = plm.TileType(shape=[128, 128], dtype=pl.FP32,
+                               target_memory=pl.MemorySpace.Acc, blayout=2, slayout=1,
+                               fractal=1024, valid_shape=[-1, -1])
+    tile_c = plm.make_tile(tile_type_c, addr=0x00000, size=65536)
+
+    tile_a_buf = (tile_a_ping, tile_a_pong)   # tuple for double-buffer dispatch
+
+    with pl.section_cube():
+        M_dim = pl.tensor.dim(a, 0)
+        K_dim = pl.tensor.dim(a, 1)
+        event_ids = (0, 1)
+
+        for i in pl.range(0, M_dim, 128):
+            for k in pl.range(0, K_dim, 128):
+                buf_idx = (k // 128) % 2
+
+                plm.load(tile_a_buf[buf_idx], a, [i, k])
+                pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1,
+                                   event_id=event_ids[buf_idx])
+                pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1,
+                                   event_id=event_ids[buf_idx])
+                # ... move, matmul, sync, store ...
+    return c
+```
+
+---
 
 ## Module Structure
 
 ```python
-# pypto.program: program_name
-import pypto.language as pl
+import pypto.language as pl           # Types, decorators, control flow, tensor/system ops
+import pypto.language.manual as plm   # Manual (non-SSA) tile operations
+import pypto.frontend as fe           # @fe.kernel, fe.compile(), fe.launch()
 ```
-
-For unnamed programs: `# pypto.program`
-
-**Note:** Module prefix is configurable (default `pl`, legacy `ir`, custom allowed).
 
 ## Type System
 
@@ -30,54 +79,185 @@ y: pl.FP32
 z: pl.BOOL
 ```
 
-Available types:
-
 | Category | Types |
-| -------- | ----- |
+|----------|-------|
 | **Integers** | `INT4`, `INT8`, `INT16`, `INT32`, `INT64` |
 | **Unsigned** | `UINT4`, `UINT8`, `UINT16`, `UINT32`, `UINT64` |
-| **Float** | `FP4`, `FP8`, `FP16`, `FP32` |
-| **Brain Float** | `BF16` |
-| **Hisilicon** | `HF4`, `HF8` |
-| **Boolean** | `BOOL` |
+| **Float** | `FP4`, `FP8E4M3FN`, `FP8E5M2`, `FP16`, `FP32` |
+| **Brain/Hisi Float** | `BF16`, `HF4`, `HF8` |
+| **Other** | `BOOL`, `INDEX` |
 
-### Tensor and Tile Types
+### Tensor Type
 
 ```python
-# Tensor (subscript notation)
-a: pl.Tensor[[4, 8], pl.FP32]               # Fixed shape
-b: pl.Tensor[[n, m], pl.INT64]              # Symbolic shape
+a: pl.Tensor[[4, 8], pl.FP32]              # Fixed shape
+b: pl.Tensor[[M, N], pl.FP16]              # Dynamic shape (DynVar)
 c: pl.Tensor[[64, 128], pl.FP32, pl.NZ]    # With layout (ND/DN/NZ)
-
-# Tile (block in unified buffer)
-t: pl.Tile[[16, 16], pl.FP16]
-
-# Ptr — raw pointer to global memory (no shape metadata)
-p: pl.Ptr[pl.FP32]   # pointer to FP32 elements → !pto.ptr<f32>
 ```
 
-### pl.Ptr — Raw Pointer Type
+### Tile Type
 
-`pl.Ptr[dtype]` declares a function parameter as a raw global-memory pointer without shape metadata. It maps to `!pto.ptr<dtype>` in PTO MLIR. Unlike `pl.Tensor`, no preamble `pto.make_tensor_view` is generated for `Ptr` parameters.
+```python
+t: pl.Tile[[16, 16], pl.FP16]
+```
 
-Use `pl.Ptr` as the first argument to `pl.make_tensor` to create a shaped tensor view from the pointer inside the function body.
+### Scalar Wrapper
 
-### pl.make_tensor — Create a View in Function Body
+```python
+s: pl.Scalar[pl.FP32]
+```
+
+### Pointer Type
+
+```python
+p: pl.Ptr[pl.FP32]    # Raw global-memory pointer → !pto.ptr<f32>
+```
+
+### Dynamic Shape Variables
+
+```python
+M = pl.DynVar('M')
+N = pl.DynVar('N')
+
+@pl.function
+def kernel(a: pl.Tensor[[M, N], pl.FP16]) -> ...:
+    M_dim = pl.tensor.dim(a, 0)   # runtime value
+```
+
+### Parameter Directions
 
 ```python
 @pl.function
-def kernel(ptr: pl.Ptr[pl.FP32]):
-    # Create a 2D tensor view from the raw pointer with explicit stride
-    view: pl.Tensor[[32, 32], pl.FP32] = pl.make_tensor(ptr, [32, 32], [32, 1])
-    tile = pl.load(view, offsets=[0, 0], shapes=[32, 32])
-    pl.store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=view)
+def kernel(
+    qi: pl.Tensor[[16, 128], pl.BF16],                  # In (default)
+    output: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],     # InOut
+    result: pl.Out[pl.Tensor[[16, 128], pl.FP32]],       # Out
+) -> pl.Tensor[[16, 128], pl.FP32]:
+    ...
 ```
 
-`pl.make_tensor(ptr, shape, stride)` creates a new `pto.make_tensor_view` inside the function body, allowing flexible remapping of a raw pointer to an n-D view with user-specified strides. The first argument must be a `pl.Ptr[dtype]` parameter.
+---
 
-### pl.addptr — Pointer Arithmetic
+## Decorators
 
-When a single workspace pointer covers multiple sub-buffers, use `pl.addptr` to compute sub-buffer addresses before calling `pl.make_tensor`:
+### @fe.kernel / @pl.function / @pl.program
+
+```python
+@fe.kernel                    # Wrap into ir.Program, ready for fe.compile()
+def my_kernel(...): ...
+
+@pl.function                  # Parse into ir.Function
+def my_func(...): ...
+
+@pl.function(type=pl.FunctionType.Orchestration)
+def orchestrator(...): ...
+
+@pl.program                   # Parse class methods into ir.Program
+class MyModel:
+    @pl.function
+    def main(self, ...): ...
+```
+
+### @pl.inline / @pl.func
+
+```python
+@pl.inline                    # Statement-level inlining at call site
+def helper(x: pl.Tensor[...]) -> ...: ...
+
+@pl.func                      # Scalar helper → func.func in MLIR
+def compute_offset(base: pl.INDEX, stride: pl.INDEX) -> pl.INDEX:
+    return base + stride
+```
+
+---
+
+## Control Flow
+
+### For Loops
+
+```python
+# Sequential
+for i in pl.range(start, stop, step):
+    ...
+
+# Parallel
+for i in pl.parallel(start, stop, step):
+    ...
+
+# Unroll (compile-time constants only)
+for i in pl.unroll(0, 4, 1):
+    ...
+
+# Chunked (split into outer/inner loops)
+for i in pl.range(0, 10, 1, chunk=5):
+    ...
+```
+
+### Loop-Carried Values (SSA iter_args)
+
+```python
+sum_init: pl.INT64 = 0
+for i, (sum,) in pl.range(0, n, 1, init_values=(sum_init,)):
+    sum = pl.yield_(sum + i)
+sum_final = sum
+```
+
+### While Loop
+
+```python
+for (x,) in pl.while_(init_values=(0,)):
+    pl.cond(x < 10)
+    x = x + 1
+    x_out = pl.yield_(x)
+```
+
+### If Statement (SSA-style)
+
+```python
+if condition:
+    y1 = pl.yield_(value1)
+else:
+    y1 = pl.yield_(value2)
+```
+
+### Sections
+
+```python
+with pl.section_cube():       # Cube core execution
+    ...
+
+with pl.section_vector():     # Vector core execution
+    ...
+```
+
+---
+
+## Tensor Operations (`pl.tensor.*`)
+
+Used for high-level tensor manipulation before loading into tiles.
+
+```python
+t = pl.tensor.create_tensor([64, 128], dtype=pl.FP32)   # Allocate tensor
+s = pl.tensor.dim(a, 0)                                  # Query shape dim
+v = pl.tensor.view(a, shape=[32, 32], offset=[0, 0])     # Slice/view
+r = pl.tensor.matmul(a, b, out_dtype=pl.FP32)            # Matmul
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `create_tensor` | `(shape, dtype) → Tensor` | Allocate new tensor |
+| `dim` | `(tensor, axis) → Scalar` | Query dimension size |
+| `view` | `(tensor, shape, offset) → Tensor` | Create subview |
+| `matmul` | `(lhs, rhs, out_dtype?, a_trans?, b_trans?) → Tensor` | Matrix multiply |
+| `mul/add/sub/div` | `(lhs, rhs) → Tensor` | Elementwise arithmetic |
+| `cast` | `(tensor, dtype, mode?) → Tensor` | Type cast |
+| `exp` | `(tensor) → Tensor` | Exponential |
+| `reshape` | `(tensor, shape) → Tensor` | Reshape |
+| `transpose` | `(tensor, axis1, axis2) → Tensor` | Transpose |
+| `row_max/row_sum` | `(tensor) → Tensor` | Row-wise reduction |
+| `assemble` | `(target, source, offset) → Tensor` | Copy into subregion |
+
+## Pointer Operations (`pl.make_tensor`, `pl.addptr`)
 
 ```python
 @pl.function
@@ -85,423 +265,238 @@ def kernel(workspace: pl.Ptr[pl.FP32]):
     buf0: pl.Ptr[pl.FP32] = pl.addptr(workspace, 0)
     buf1: pl.Ptr[pl.FP32] = pl.addptr(workspace, 1024)
     view0: pl.Tensor[[32, 32], pl.FP32] = pl.make_tensor(buf0, [32, 32], [32, 1])
-    view1: pl.Tensor[[32, 32], pl.FP32] = pl.make_tensor(buf1, [32, 32], [32, 1])
 ```
 
-`pl.addptr(ptr, offset)` emits `pto.addptr` in ptoas codegen and returns a new `pl.Ptr` with the same element dtype advanced by `offset` elements.
+## System Operations (`pl.system.*`)
 
-### Memory References (MemRef)
+Hardware synchronization primitives:
 
 ```python
-# Create MemRef
-addr_expr = pl.ConstInt(0x1000, pl.INT64, span)
-memref = pl.MemRef(pl.MemorySpace.DDR, addr_expr, 1024)
-
-# Memory spaces: DDR, Vec, Mat, Left, Right, Acc
-
-# Tensor with memref
-tensor: pl.Tensor[[64, 128], pl.FP32]  # memref=pl.MemRef(pl.MemorySpace.DDR, addr, 8192)
+pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
+pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
+pl.system.bar_v()       # Vector barrier
+pl.system.bar_m()       # Matrix barrier
+pl.system.bar_all()     # Global barrier
 ```
 
-### Tile Views (TileView)
+Pipeline types: `MTE1`, `MTE2`, `MTE3`, `M`, `V`, `S`, `FIX`, `ALL`
+
+---
+
+## Manual Operations (`plm.*`)
+
+`import pypto.language.manual as plm`
+
+All manual operations write into pre-allocated output tiles (non-SSA). The user explicitly manages memory addresses and buffer reuse.
+
+### Tile Allocation
 
 ```python
-# Create TileView
-valid_shape = [pl.ConstInt(16, pl.INT64, span)] * 2
-stride = [pl.ConstInt(1, pl.INT64, span), pl.ConstInt(16, pl.INT64, span)]
-start_offset = pl.ConstInt(0, pl.INT64, span)
-tile_view = pl.TileView(valid_shape=valid_shape, stride=stride, start_offset=start_offset)
+@dataclass
+class TileType:
+    shape: Sequence[int]         # Tile dimensions
+    dtype: DataType              # Element type
+    target_memory: MemorySpace   # Vec (default), Mat, Left, Right, Acc
+    valid_shape: list[int] | None = None   # Valid shape (optional)
+    blayout: int | None = None   # Block layout: 0=none_box, 1=row_major, 2=col_major
+    slayout: int | None = None   # Scatter layout: 0=none_box, 1=row_major, 2=col_major
+    fractal: int | None = None   # Fractal size
+    pad: int | None = None       # Pad mode: 0=null, 1=zero, 2=max, 3=min
 
-# Tile with memref and tile_view
-tile: pl.Tile(
-    (16, 16), pl.FP16,
-    memref=pl.MemRef(pl.MemorySpace.Left, addr, 512),
-    tile_view=pl.TileView(valid_shape=..., stride=..., start_offset=...)
-)
+tile = plm.make_tile(tile_type, addr=0x00000, size=32768)
 ```
+
+**Double-buffer pattern** — allocate ping/pong at different addresses:
+
+```python
+tile_ping = plm.make_tile(tile_type, addr=0x00000, size=32768)
+tile_pong = plm.make_tile(tile_type, addr=0x10000, size=32768)
+tile_buf = (tile_ping, tile_pong)
+
+buf_idx = (k // 128) % 2
+plm.load(tile_buf[buf_idx], tensor, [i, k])   # variable-index dispatch
+```
+
+### Memory Operations
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `load` | `(out, tensor, offsets, shapes?) → None` | GM → tile |
+| `load_tile` | `(out, tensor, tile_offsets) → None` | GM → tile (tile-relative offsets) |
+| `store` | `(tensor, tile, offsets, shapes?) → Tensor` | tile → GM |
+| `store_tile` | `(tensor, tile, tile_offsets) → Tensor` | tile → GM (tile-relative) |
+| `l0c_store` | `(tile, offsets, shapes, tensor) → Tensor` | Acc → GM |
+| `move` | `(tile, target_memory, out, transpose?) → None` | Move between memory levels |
+| `ub_copy` | `(tile, out) → None` | Copy within UB |
+| `full` | `(value, out) → None` | Fill tile with scalar |
+| `fillpad` | `(tile, out) → None` | Pad tile |
+
+```python
+plm.load(tile_a, tensor_a, [i, k])                       # Load from GM
+plm.move(tile_a, pl.MemorySpace.Left, tile_a_compute)    # Mat → Left
+plm.store(output_tensor, tile_c, [i, j])                 # Tile → GM
+plm.l0c_store(tile_c, [i, j], [128, 128], output_tensor) # Acc → GM
+```
+
+### Elementwise Operations
+
+**Tile × Tile** — all `(lhs, rhs, out) → None`:
+`add`, `sub`, `mul`, `div`, `rem`, `maximum`, `minimum`, `and_`, `or_`, `shl`, `shr`
+
+**Tile × Scalar** — all `(lhs, scalar, out) → None`:
+`adds`, `subs`, `muls`, `divs`, `rems`, `ands`, `ors`, `shls`, `shrs`, `maxs`, `mins`, `lrelu`
+
+**Unary** — all `(tile, out) → None`:
+`neg`, `exp`, `sqrt`, `rsqrt`, `recip`, `log`, `abs`, `relu`, `not_`
+
+Special: `cast(tile, target_type, out, mode="round") → None`
+
+### Ternary / Multi-Input
+
+`xor(lhs, rhs, tmp, out)`, `xors(lhs, scalar, tmp, out)`, `prelu(tile, slope, tmp, out)`, `addc(lhs, rhs, rhs2, out)`, `subc(lhs, rhs, rhs2, out)`, `addsc(lhs, scalar, rhs2, out)`, `subsc(lhs, scalar, rhs2, out)`, `sel(mask, lhs, rhs, out)`, `sels(lhs, rhs, mode, out)`
+
+### Comparison
+
+`cmp(lhs, rhs, out, cmp_type=0)`, `cmps(lhs, scalar, out, cmp_type=0)` — cmp_type: EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5
+
+### Reduction (require `tmp` scratch buffer)
+
+`row_max(tile, tmp, out)`, `row_sum(tile, tmp, out)`, `row_min(tile, tmp, out)`
+
+### Broadcast / Expansion
+
+`row_expand(src, out)`, `row_expand_add/sub/mul/div(tile, row_vec, out)`, `col_expand(col_vec, out)`, `col_expand_mul/div/sub(tile, col_vec, out)`, `expands(scalar, out)`
+
+### Matrix Operations
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `matmul` | `(lhs, rhs, out)` | `out = lhs @ rhs` |
+| `matmul_acc` | `(acc, lhs, rhs, out)` | `out = acc + lhs @ rhs` |
+| `matmul_bias` | `(lhs, rhs, bias, out)` | `out = lhs @ rhs + bias` |
+| `gemv` | `(lhs, rhs, out)` | Matrix-vector multiply |
+| `gemv_acc` | `(acc, lhs, rhs, out)` | GEMV with accumulation |
+| `gemv_bias` | `(lhs, rhs, bias, out)` | GEMV with bias |
+
+### Layout
+
+```python
+plm.reshape(tile, shape=[64, 64], out=out_tile)
+plm.transpose(tile, axis1=0, axis2=1, out=out_tile)
+```
+
+### Query (same as `pl.*`)
+
+```python
+plm.get_block_idx()        # Current block index (Scalar)
+plm.get_block_num()        # Total block count (Scalar)
+plm.get_subblock_idx()     # Subblock index: 0 or 1 (Scalar)
+```
+
+---
 
 ## Expressions
 
 ### Variables and Constants
 
 ```python
-x              # Variable reference
-tensor_a       # Tensor variable
-42             # Integer literal
-3.14           # Float literal
+x                          # Variable reference
+42                         # Integer literal
+3.14                       # Float literal
+pl.const(0, pl.INT64)     # Typed constant
 ```
 
-**Closure variables:** Names not found in the DSL scope are resolved from the enclosing Python scope. Supported types: `int`, `float`, `bool`, `list`, `tuple`, and IR expressions.
+**Closure variables:** Names not in DSL scope resolve from enclosing Python scope (`int`, `float`, `bool`, `list`, `tuple`).
 
-```python
-OFFSET = [0, 0]
-TILE_SHAPE = [64, 64]
+### Binary / Unary Operators
 
-@pl.function
-def func(t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
-    a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, OFFSET, TILE_SHAPE)  # closure vars as positional args
-    ...
-```
-
-### Binary Operations
-
-| Python Operator | PyPTO IR | Category |
-| --------------- | -------- | -------- |
-| `+` | Add | Arithmetic |
-| `-` | Sub | Arithmetic |
-| `*` | Mul | Arithmetic |
-| `//` | FloorDiv | Arithmetic |
-| `%` | FloorMod | Arithmetic |
-| `/` | FloatDiv | Arithmetic |
-| `**` | Pow | Arithmetic |
+| Python | IR | Category |
+|--------|----|----------|
+| `+`, `-`, `*`, `//`, `%`, `/`, `**` | Add, Sub, Mul, FloorDiv, FloorMod, FloatDiv, Pow | Arithmetic |
 | `==`, `!=`, `<`, `<=`, `>`, `>=` | Eq, Ne, Lt, Le, Gt, Ge | Comparison |
-| `and`, `or` | And, Or | Logical |
-| `^` | Xor | Logical |
-| `&` | BitAnd | Bitwise |
-| `\|` | BitOr | Bitwise |
-| `<<`, `>>` | BitShiftLeft, BitShiftRight | Bitwise |
+| `and`, `or`, `^` | And, Or, Xor | Logical |
+| `&`, `\|`, `<<`, `>>` | BitAnd, BitOr, BitShiftLeft, BitShiftRight | Bitwise |
+| `-x`, `~x`, `not x` | Neg, BitNot, Not | Unary |
+| `abs(x)`, `min(a,b)`, `max(a,b)` | Abs, Min, Max | Built-in |
 
-### Unary Operations and Functions
-
-```python
--x              # Neg
-~x              # BitNot
-not x           # Not
-abs(x)          # Abs
-min(a, b)       # Min
-max(a, b)       # Max
-```
-
-### Function/Op Calls
-
-```python
-# Explicit namespace
-pl.tensor.add(a, b)                  # Tensor addition
-pl.block.load(t, [0, 0], [64, 64])      # Block load
-
-# Unified dispatch (auto-selects tensor/block based on input type)
-pl.add(a, b)                          # Tensor or Tile — dispatched automatically
-pl.mul(tile, 2.0)                     # Tile + scalar → block.muls
-pl.exp(tile)                          # Tile → block.exp
-
-# Promoted ops (single-module ops accessible at pl.*)
-pl.load(t, [0, 0], [64, 64])            # Promoted from block
-pl.create_tensor([64], dtype=pl.FP32)       # Promoted from tensor
-
-# System operations (synchronization primitives)
-pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
-pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
-pl.system.bar_v()                        # Vector barrier
-pl.system.bar_m()                        # Matrix barrier
-pl.system.bar_all()                      # Global barrier
-```
-
-## Statements
-
-### Assignment
-
-```python
-x: pl.INT64 = expr
-y: pl.Tensor[[4], pl.FP32] = tensor_op(a)
-```
-
-### If Statement (SSA-style)
-
-```python
-# If with both branches
-if condition:
-    y1 = pl.yield_(value1)
-else:
-    y1 = pl.yield_(value2)
-
-# Multiple return values (no inline type annotations)
-if condition:
-    y1, y2 = pl.yield_(value1, value2)
-else:
-    y1, y2 = pl.yield_(value3, value4)
-```
-
-**Key points:**
-
-- `pl.yield_()` assigns to SSA phi nodes
-- Variables defined in yield become accessible after if
-- Both branches must yield the same variables
-- Type annotations cannot be used inline with tuple unpacking
-
-### For Loop (SSA-style with iter_args)
-
-```python
-# Simple loop
-for i in pl.range(start, stop, step):
-    body_statements
-
-# Loop with iter_args (loop-carried values)
-sum_init: pl.INT64 = 0
-for i, (sum,) in pl.range(0, n, 1, init_values=(sum_init,)):
-    sum = pl.yield_(sum + i)
-sum_final = sum
-
-# Parallel for loop
-for i in pl.parallel(start, stop, step):
-    body_statements
-```
-
-**Key points:** Loop-carried values use `pl.range()` or `pl.parallel()` with `init_values`, tuple unpacking `(sum,)` declares iter_args, `pl.yield_()` updates values for next iteration, after loop iter_args contain final values. `pl.parallel()` produces a `ForKind.Parallel` loop while `pl.range()` produces `ForKind.Sequential` (default).
-
-#### Chunked Loops
-
-```python
-# Split loop into chunks of C iterations (nested outer/inner loops)
-for i in pl.range(0, 10, 1, chunk=5):
-    body_statements
-
-for i in pl.parallel(0, 8, 1, chunk=4):
-    body_statements
-
-for i in pl.unroll(0, 12, 1, chunk=4):
-    body_statements
-```
-
-**Key points:** `chunk=C` splits the loop into an outer sequential loop and an inner loop of `C` iterations. The inner loop preserves the original kind (Sequential/Parallel/Unroll). `chunk` cannot be combined with `init_values`. See [SplitChunkedLoops Pass](../passes/11-split_chunked_loops.md).
-
-### Yield Statement
-
-```python
-yield            # No values
-yield x          # Single value
-yield x, y       # Multiple values
-```
-
-### Statement Sequences
-
-```python
-stmt1            # Natural Python sequencing
-stmt2
-stmt3
-```
+---
 
 ## Functions
 
 ```python
-# Single return type
-def function_name(param1: pl.INT64, param2: pl.FP32) -> pl.INT64:
-    x: pl.INT64 = param1 + 1
-    return x
+# Single return
+def func(x: pl.INT64) -> pl.INT64:
+    return x + 1
 
-# Multiple return types
-def function_name(x: pl.INT64) -> tuple[pl.INT64, pl.INT64]:
-    y: pl.INT64 = x + 1
-    z: pl.INT64 = x * 2
-    return y, z
+# Multiple return
+def func(x: pl.INT64) -> tuple[pl.INT64, pl.INT64]:
+    return x + 1, x * 2
 
-# No return types
-def function_name(x: pl.INT64):
-    y: pl.INT64 = x + 1
-
-# With function type
-@pl.function(type=pl.FunctionType.Orchestration)
-def orchestrator(n: pl.INT64) -> pl.INT64:
-    return n + 1
-
-@pl.function(type=pl.FunctionType.InCore)
-def aicore_kernel(x: pl.INT64) -> pl.INT64:
-    return x * 2
+# No return
+def func(x: pl.INT64):
+    pass
 ```
 
 ### Function Types
 
-| Type | Usage | Description |
-| ---- | ----- | ----------- |
-| `pl.FunctionType.Opaque` | Default | Unspecified function type |
-| `pl.FunctionType.Orchestration` | Host/AICPU | Control flow and dependency analysis |
-| `pl.FunctionType.InCore` | AICore | Sub-graph on specific AICore |
-
-When no type is specified, functions default to `Opaque`.
-
-### Parameter Directions
-
-Parameters can have `In` (default), `Out`, or `InOut` directions using wrapper types:
-
-```python
-@pl.function(type=pl.FunctionType.InCore)
-def kernel(
-    qi: pl.Tensor[[16, 128], pl.BF16],                   # In (default)
-    output: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],      # InOut
-    result: pl.Out[pl.Tensor[[16, 128], pl.FP32]],        # Out
-    scale: pl.Scalar[pl.FP32],                             # In (default)
-) -> pl.Tensor[[16, 128], pl.FP32]:
-    ...
-```
-
-| Direction | Wrapper | Description |
-| --------- | ------- | ----------- |
-| `In` | None (default) | Read-only input parameter |
-| `Out` | `pl.Out[type]` | Write-only output parameter |
-| `InOut` | `pl.InOut[type]` | Read-write input/output parameter |
-
-**Constraint:** `Scalar` parameters cannot have `InOut` direction (raises `ParserTypeError`).
+| Type | Description |
+|------|-------------|
+| `pl.FunctionType.Opaque` | Default, unspecified |
+| `pl.FunctionType.Orchestration` | Host/AICPU control flow |
+| `pl.FunctionType.InCore` | AICore sub-graph |
 
 ### Tiling Parameters
 
-A **tiling parameter** groups related scalar configuration values (loop bounds, offsets, etc.) into a named struct. Define a plain Python class with `int`, `float`, `bool`, or `Array[T, N]` field annotations:
+Group related scalars into a struct (last parameter, at most one):
 
 ```python
 from pypto.language.typing.tiling import Array
 
 class Tiling:
-    m: int              # → Scalar[INT32]
-    n: int              # → Scalar[INT32]
-    scale: float        # → Scalar[FP32]
-    offsets: Array[int, 3]   # → 3 × Scalar[INT32]
-```
-
-When used as a function parameter, each field is flattened to individual scalar IR params:
-
-- Scalar fields: `{param}_{field}` (e.g., `tiling_n`)
-- Array fields: `{param}_{field}_{i}` for each index (e.g., `tiling_offsets_0`, `tiling_offsets_1`, `tiling_offsets_2`)
-
-```python
-import pypto.language as pl
-from pypto.language.typing.tiling import Array
+    m: int                  # → Scalar[INT32]
+    n: int                  # → Scalar[INT32]
+    offsets: Array[int, 3]  # → 3 × Scalar[INT32]
 
 @pl.function
-def kernel(
-    x: pl.Tensor[[64], pl.FP32],
-    tiling: Tiling,   # flattened to tiling_m, tiling_n, tiling_scale,
-                      #   tiling_offsets_0, tiling_offsets_1, tiling_offsets_2
-) -> pl.Scalar[pl.INT32]:
-    n: pl.Scalar[pl.INT32] = tiling.n            # resolves to tiling_n IR var
-    off: pl.Scalar[pl.INT32] = tiling.offsets[1] # resolves to tiling_offsets_1 IR var
+def kernel(x: pl.Tensor[[64], pl.FP32], tiling: Tiling) -> pl.Scalar[pl.INT32]:
+    n = tiling.n                  # resolves to tiling_n
+    off = tiling.offsets[1]       # resolves to tiling_offsets_1
     return off
-```
-
-**Constraints:**
-
-- At most **one** tiling parameter per function
-- The tiling parameter must be the **last** parameter
-- Scalar field types: `int` (→ `INT32`), `float` (→ `FP32`), `bool` (→ `BOOL`)
-- Array field type: `Array[T, N]` where `T` is `int`/`float`/`bool` and `N` is a positive integer
-- Array subscript index must be a **literal integer** (no dynamic indexing)
-
-## Complete Example
-
-### Tensor Operations (Loop with iter_args)
-
-```python
-# pypto.program: my_program
-import pypto.language as pl
-
-def loop_sum(n: pl.INT64) -> pl.INT64:
-    sum_init: pl.INT64 = 0
-    for i, (sum,) in pl.range(0, n, 1, init_values=(sum_init,)):
-        sum = pl.yield_(sum + i)
-    return sum
-```
-
-### Block Operations (Tile-based computation)
-
-```python
-import pypto.language as pl
-
-@pl.program
-class BlockExample:
-    @pl.function
-    def tile_add(
-        self,
-        input_a: pl.Tensor[[64, 64], pl.FP32],
-        input_b: pl.Tensor[[64, 64], pl.FP32],
-        output: pl.Tensor[[64, 64], pl.FP32],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-        tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
-        tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
-        result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], [64, 64], output)
-        return result
-```
-
-## SSA-Style Control Flow
-
-`pl.yield_()` creates SSA phi nodes for if/for statements:
-
-```python
-# If: phi node at merge point
-if condition:
-    y1 = pl.yield_(x + 1)
-else:
-    y1 = pl.yield_(x + 2)
-# y1 = phi(x + 1, x + 2)
-
-# For: loop-carried values via iter_args
-sum_init: pl.INT64 = 0
-for i, (sum,) in pl.range(0, 10, 1, init_values=(sum_init,)):
-    sum = pl.yield_(sum + i)
-sum_final: pl.INT64 = sum  # captures final value
 ```
 
 ## Cross-Module Function Reuse
 
-Functions defined outside a `@pl.program` class can be reused via two mechanisms.
-
-### External `@pl.function` Calls
-
-An externally-defined `@pl.function` can be called by name inside `@pl.program`. The function is automatically added to the Program and an `ir.Call(GlobalVar, args)` is emitted.
-
 ```python
 @pl.function
-def softmax(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    ...
+def softmax(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]: ...
 
 @pl.program
 class MyModel:
     @pl.function
     def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        y: pl.Tensor[[64], pl.FP32] = softmax(x)   # ir.Call(GlobalVar("softmax"), [x])
+        y = softmax(x)   # auto-added to Program as GlobalVar call
         return y
 ```
 
-**Rules:**
+`@pl.inline` expands the body at each call site instead of generating a separate function.
 
-- Uses the function's `.name` as GlobalVar (aliases are transparent)
-- External and internal function names must not conflict
-- Two different externals with the same `.name` is an error
-- Same external called from multiple methods is added once
+---
 
-### `@pl.inline` Decorator
-
-`@pl.inline` captures a function for statement-level inlining. No function is added to the Program — the body is expanded at each call site.
+## Compilation and Execution
 
 ```python
-@pl.inline
-def normalize(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
-    return result
+import pypto.frontend as fe
 
-@pl.program
-class MyModel:
-    @pl.function
-    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        y: pl.Tensor[[64], pl.FP32] = normalize(x)  # statements inlined in-place
-        return y
-```
+@fe.kernel
+def my_kernel(...): ...
 
-**Rules:**
-
-- Argument count must match parameter list exactly
-- Closure variables from the inline definition site are available
-- Inline functions can be called multiple times (each expansion is independent)
-- Nested inline calls are supported
-
-## Configurable Module Prefix
-
-The printer supports configurable module prefixes (`pl`, `pi`, `ir`, or custom):
-
-```python
-print(ir.python_print(stmt))          # "x: pl.INT64 = a + b" (default)
-print(ir.python_print(stmt, "ir"))    # "x: ir.INT64 = a + b"
+compiled = fe.compile(my_kernel, arch="dav-c220-cube")
+fe.launch(None, num_cores, compiled, *args)
 ```
 
 ## References
 
-- [IR Overview](../ir/00-overview.md) - Core IR structures
-- [IR Parser](../ir/07-parser.md) - Parsing Python syntax back to IR
-- [Operator Registration](../ir/05-operators.md) - Op system and type inference
+- [IR Overview](../ir/00-overview.md) — Core IR structures
+- [IR Parser](../ir/07-parser.md) — Parsing Python syntax back to IR
+- [Operator Registration](../ir/05-operators.md) — Op system and type inference
+- [Architecture](../ARCHITECTURE.md) — System architecture overview

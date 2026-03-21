@@ -181,11 +181,11 @@ def test_dynamic_matmul_db():
 
         print("***********npu output***********")
         print(c.shape, c.dtype)
-        print(c)
+        # print(c)
         c_ref = torch.matmul(a.float(), b.float())
         print("***********golden output***********")
         print(c_ref.shape, c_ref.dtype)
-        print(c_ref)
+        # print(c_ref)
 
         torch.testing.assert_close(c, c_ref, rtol=1e-2, atol=1e-2)
         print("result equal!")

@@ -216,6 +216,31 @@ void VerifyProperties(const IRPropertySet& properties, const ProgramPtr& program
 
 }  // namespace pass
 
+// ---------------------------------------------------------------------------
+// Stub (no-op) implementations for passes whose .cpp files were removed.
+// Each returns the program unchanged.  The factory functions are still declared
+// in passes.h and referenced from Python bindings / PassManager.
+// ---------------------------------------------------------------------------
+namespace pass {
+
+static Pass MakeIdentityPass(const std::string& name) {
+  return CreateProgramPass([](const ProgramPtr& p) { return p; }, name);
+}
+
+Pass InitMemRef() { return MakeIdentityPass("InitMemRef"); }
+Pass BasicMemoryReuse() { return MakeIdentityPass("BasicMemoryReuse"); }
+Pass AllocateMemoryAddr() { return MakeIdentityPass("AllocateMemoryAddr"); }
+Pass SplitChunkedLoops() { return MakeIdentityPass("SplitChunkedLoops"); }
+Pass InterchangeChunkLoops() { return MakeIdentityPass("InterchangeChunkLoops"); }
+Pass UnrollLoops() { return MakeIdentityPass("UnrollLoops"); }
+Pass OutlineIncoreScopes() { return MakeIdentityPass("OutlineIncoreScopes"); }
+Pass ConvertTensorToBlockOps() { return MakeIdentityPass("ConvertTensorToBlockOps"); }
+Pass FlattenCallExpr() { return MakeIdentityPass("FlattenCallExpr"); }
+Pass NormalizeStmtStructure() { return MakeIdentityPass("NormalizeStmtStructure"); }
+Pass FlattenSingleStmt() { return MakeIdentityPass("FlattenSingleStmt"); }
+
+}  // namespace pass
+
 // PassPipeline implementation
 
 PassPipeline::PassPipeline() = default;

@@ -119,7 +119,6 @@ class MemoryReport : public Report {
 
 /**
  * @brief Factory function for creating MemoryReportGenerator
- * (analogous to CreateAllocatedMemoryAddrPropertyVerifier)
  */
 ReportGeneratorPtr CreateMemoryReportGenerator();
 

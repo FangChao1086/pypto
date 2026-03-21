@@ -38,12 +38,6 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::SSAForm, CreateSSAPropertyVerifier);
   Register(IRProperty::TypeChecked, CreateTypeCheckPropertyVerifier);
   Register(IRProperty::NoNestedCalls, CreateNoNestedCallPropertyVerifier);
-  Register(IRProperty::NormalizedStmtStructure, CreateNormalizedStmtPropertyVerifier);
-  Register(IRProperty::FlattenedSingleStmt, CreateFlattenedSingleStmtPropertyVerifier);
-  Register(IRProperty::SplitIncoreOrch, CreateSplitIncoreOrchPropertyVerifier);
-  Register(IRProperty::HasMemRefs, CreateHasMemRefsPropertyVerifier);
-  Register(IRProperty::IncoreBlockOps, CreateIncoreBlockOpsPropertyVerifier);
-  Register(IRProperty::AllocatedMemoryAddr, CreateAllocatedMemoryAddrPropertyVerifier);
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {

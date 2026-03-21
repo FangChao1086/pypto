@@ -52,31 +52,10 @@ class PassManager:
         """Register all strategy Pass configurations."""
         cls._strategy_passes = {
             OptimizationStrategy.Default: [
-                ("UnrollLoops", lambda: passes.unroll_loops()),
-                ("ConvertToSSA", lambda: passes.convert_to_ssa()),
-                ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
-                ("SplitChunkedLoops", lambda: passes.split_chunked_loops()),
-                ("InterchangeChunkLoops", lambda: passes.interchange_chunk_loops()),
-                ("RunVerifier", lambda: passes.run_verifier()),
-                ("OutlineIncoreScopes", lambda: passes.outline_incore_scopes()),
-                ("ConvertTensorToBlockOps", lambda: passes.convert_tensor_to_block_ops()),
-                ("InitMemRef", lambda: passes.init_mem_ref()),
-                ("MemoryReuse", lambda: passes.basic_memory_reuse()),
                 ("InsertSync", lambda: passes.insert_sync()),
-                ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
             ],
             OptimizationStrategy.PTOAS: [
-                ("UnrollLoops", lambda: passes.unroll_loops()),
-                ("ConvertToSSA", lambda: passes.convert_to_ssa()),
-                ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
-                ("SplitChunkedLoops", lambda: passes.split_chunked_loops()),
-                ("InterchangeChunkLoops", lambda: passes.interchange_chunk_loops()),
-                ("RunVerifier", lambda: passes.run_verifier()),
-                ("OutlineIncoreScopes", lambda: passes.outline_incore_scopes()),
-                ("ConvertTensorToBlockOps", lambda: passes.convert_tensor_to_block_ops()),
-                ("InitMemRef", lambda: passes.init_mem_ref()),
-                ("MemoryReuse", lambda: passes.basic_memory_reuse()),
-                ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
+                ("InsertSync", lambda: passes.insert_sync()),
             ],
         }
 
