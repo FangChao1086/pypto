@@ -231,7 +231,66 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
   CHECK(op->args_.size() == 1) << "Operation:" << pto_op_name << "] requires 1 argument, but got "
                                << op->args_.size();
   std::string src = codegen.GetExprAsCode(op->args_[0]);
-  codegen.Emit(pto_op_name + " ins(" + src + " | !pto.partition_tensor_view<MxNxdtype>)");
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  if (!src_type.empty()) {
+    codegen.Emit(pto_op_name + " ins(" + src + " : " + src_type + ")");
+  } else {
+    codegen.Emit(pto_op_name + " ins(" + src + ")");
+  }
+  return "";
+}
+
+static std::string GetStaticPartitionType(const ir::MakeTuple* shapes_tuple, const std::string& dtype_str) {
+  std::ostringstream oss;
+  oss << "!pto.partition_tensor_view<";
+  for (size_t i = 0; i < shapes_tuple->elements_.size(); ++i) {
+    if (i > 0) oss << "x";
+    auto dim = As<ir::ConstInt>(shapes_tuple->elements_[i]);
+    INTERNAL_CHECK(dim) << "partition shape must be static ConstInt at axis " << i;
+    oss << dim->value_;
+  }
+  oss << "x" << dtype_str << ">";
+  return oss.str();
+}
+
+static std::string MakeTensorPrintCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "tensor.print requires 3 arguments, but got " << op->args_.size();
+
+  auto tensor = As<Var>(op->args_[0]);
+  INTERNAL_CHECK(tensor) << "tensor.print first argument must be a Var";
+
+  auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
+  INTERNAL_CHECK(offsets_tuple) << "tensor.print second argument must be a tuple (offsets)";
+
+  auto shapes_tuple = As<ir::MakeTuple>(op->args_[2]);
+  INTERNAL_CHECK(shapes_tuple) << "tensor.print third argument must be a tuple (shapes)";
+
+  auto tensor_type = As<TensorType>(tensor->GetType());
+  INTERNAL_CHECK(tensor_type) << "tensor.print tensor argument must have TensorType";
+
+  std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
+  std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
+  std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
+  std::string partition_type = GetStaticPartitionType(shapes_tuple.get(), dtype_str);
+
+  std::string partition_view = codegen.NewTemp();
+  std::ostringstream partition_line;
+  partition_line << partition_view << " = pto.partition_view " << tensor_view;
+  partition_line << ", offsets = [";
+  for (size_t i = 0; i < offsets_tuple->elements_.size(); ++i) {
+    if (i > 0) partition_line << ", ";
+    partition_line << codegen.GetExprAsCode(offsets_tuple->elements_[i]);
+  }
+  partition_line << "], sizes = [";
+  for (size_t i = 0; i < shapes_tuple->elements_.size(); ++i) {
+    if (i > 0) partition_line << ", ";
+    partition_line << codegen.GetExprAsCode(shapes_tuple->elements_[i]);
+  }
+  partition_line << "] : " << tensor_view_type << " -> " << partition_type;
+  codegen.Emit(partition_line.str());
+
+  codegen.Emit("pto.tprint ins(" + partition_view + " : " + partition_type + ")");
   return "";
 }
 
@@ -602,6 +661,12 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.dim")
     .set_pipe(ir::PipeType::S)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeTensorDimCodegenPTO(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.print")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeTensorPrintCodegenPTO(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.reshape")

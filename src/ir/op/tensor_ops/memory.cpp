@@ -224,6 +224,54 @@ TypePtr DeduceTensorAssembleType(const std::vector<ExprPtr>& args,
   return std::make_shared<TensorType>(target_type->shape_, target_type->dtype_);
 }
 
+TypePtr DeduceTensorPrintType(const std::vector<ExprPtr>& args,
+                              const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 3) << "tensor.print requires exactly 3 arguments (tensor, offsets, shapes), but got "
+                          << args.size();
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << "tensor.print requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  auto offsets = As<MakeTuple>(args[1]);
+  CHECK(offsets) << "tensor.print requires offsets to be a MakeTuple";
+
+  auto shapes = As<MakeTuple>(args[2]);
+  CHECK(shapes) << "tensor.print requires shapes to be a MakeTuple";
+
+  const size_t rank = tensor_type->shape_.size();
+  CHECK(offsets->elements_.size() == rank)
+      << "tensor.print offsets count (" << offsets->elements_.size()
+      << ") must match tensor rank (" << rank << ")";
+  CHECK(shapes->elements_.size() == rank)
+      << "tensor.print shapes count (" << shapes->elements_.size()
+      << ") must match tensor rank (" << rank << ")";
+
+  for (size_t i = 0; i < rank; ++i) {
+    auto offset_scalar = As<ScalarType>(offsets->elements_[i]->GetType());
+    CHECK(offset_scalar) << "tensor.print offset element " << i << " must be ScalarType, but got "
+                         << offsets->elements_[i]->GetType()->TypeName();
+    CHECK(offset_scalar->dtype_.IsInt())
+        << "tensor.print offset element " << i << " must have integer dtype, but got "
+        << offset_scalar->dtype_.ToString();
+    CHECK(As<ConstInt>(offsets->elements_[i]))
+        << "tensor.print currently only supports static offsets; axis " << i << " is dynamic";
+
+    auto shape_scalar = As<ScalarType>(shapes->elements_[i]->GetType());
+    CHECK(shape_scalar) << "tensor.print shape element " << i << " must be ScalarType, but got "
+                        << shapes->elements_[i]->GetType()->TypeName();
+    CHECK(shape_scalar->dtype_.IsInt())
+        << "tensor.print shape element " << i << " must have integer dtype, but got "
+        << shape_scalar->dtype_.ToString();
+    auto shape_const = As<ConstInt>(shapes->elements_[i]);
+    CHECK(shape_const) << "tensor.print currently only supports static shapes; axis " << i << " is dynamic";
+    CHECK(shape_const->value_ > 0) << "tensor.print shape element " << i
+                                   << " must be positive, got " << shape_const->value_;
+  }
+
+  return GetUnknownType();
+}
+
 // ============================================================================
 // Registration Function for Tensor Memory Operations
 // ============================================================================
@@ -268,6 +316,17 @@ REGISTER_OP("tensor.assemble")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorAssembleType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.print")
+    .set_op_category("TensorOp")
+    .set_description("Print a tensor window for debugging")
+    .add_argument("tensor", "Input tensor (TensorType)")
+    .add_argument("offsets", "Static offsets per dimension (MakeTuple of ConstInt)")
+    .add_argument("shapes", "Static shape per dimension (MakeTuple of ConstInt)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorPrintType(args, kwargs);
     });
 
 TypePtr DeduceTensorDimType(const std::vector<ExprPtr>& args,

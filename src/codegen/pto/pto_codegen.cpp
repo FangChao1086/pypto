@@ -563,6 +563,12 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       current_result_tile_type_ = result_tile_type;
       current_result_var_name_ = op->var_->name_;
       VisitExpr(op->value_);
+      // Built-in tile-producing ops often write directly to current_result_buf_
+      // without producing a separate SSA value in current_expr_value_. Record the
+      // assigned buffer name so later uses like block.print(tile) can resolve it.
+      if (result_tile_type && !current_result_buf_.empty()) {
+        var_to_mlir_[op->var_->name_] = current_result_buf_;
+      }
       // If codegen changed the result buffer (e.g., reshape allocated a new tile),
       // update variable mapping so subsequent references use the new buffer
       if (!current_result_buf_.empty() && current_result_buf_ != result_buf) {
@@ -899,6 +905,7 @@ std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
       if (tile_type->memref_.has_value()) {
         return GetTileBufTypeString(tile_type->memref_.value().get());
       }
+      return "";
     }
   }
   if (auto const_float = As<ir::ConstFloat>(expr)) {

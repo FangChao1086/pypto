@@ -21,12 +21,13 @@ Tests verify:
 
 from dataclasses import dataclass
 import pypto.language as pl
+import pypto.language.manual as plm
 import pytest
 from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.builder import IRBuilder
-from pypto.ir.op import block
+from pypto.ir.op import block, tensor as tensor_op
 from pypto.ir.pto_codegen import (
     _generate_arg_unpacking,
     _generate_kernel_wrapper,
@@ -240,6 +241,26 @@ def test_pto_codegen_tensor_parameters():
     assert "!pto.tensor_view<?x?xf32>" in mlir_code
 
 
+def test_tensor_print_ir_returns_unknown_type():
+    """tensor.print IR helper should return UnknownType."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("input", ir.TensorType([48, 64], DataType.FP32), span)
+
+    call = tensor_op.print_(tensor_var)
+
+    assert isinstance(call.type, ir.UnknownType)
+
+
+def test_block_print_ir_returns_unknown_type():
+    """block.print IR helper should return UnknownType."""
+    span = ir.Span.unknown()
+    tile_var = ir.Var("tile", ir.TileType([16, 16], DataType.FP32), span)
+
+    call = block.print_(tile_var)
+
+    assert isinstance(call.type, ir.UnknownType)
+
+
 def test_pto_codegen_alloc_tile():
     """Test that tile buffers generate alloc_tile operations."""
     backend.reset_for_testing()
@@ -316,6 +337,91 @@ def test_pto_codegen_block_store_lowering():
     assert "pto.tstore" in mlir_code
     assert "ins(" in mlir_code
     assert "outs(" in mlir_code
+
+
+def test_pto_codegen_dump_tensor_full_tensor_lowering():
+    """plm.dump_tensor without offsets/shapes prints the full logical tensor."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class DumpFullProgram:
+        @pl.function
+        def dump_full(
+            self,
+            input: pl.Tensor[[48, 64], pl.FP32],
+            output: pl.Tensor[[48, 64], pl.FP32],
+        ):
+            plm.dump_tensor(input)
+            tile = pl.load(input, offsets=[0, 0], shapes=[16, 16])
+            pl.store(tile, offsets=[0, 0], shapes=[16, 16], output_tensor=output)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(DumpFullProgram)
+
+    codegen_obj = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+
+    assert mlir_code.count("pto.tprint") == 1
+    assert "sizes = [%c48, %c64]" in mlir_code
+    assert "!pto.partition_tensor_view<48x64xf32>" in mlir_code
+
+
+def test_pto_codegen_dump_tensor_static_window_lowering():
+    """plm.dump_tensor with offsets/shapes lowers to partition_view + tprint for that window."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class DumpWindowProgram:
+        @pl.function
+        def dump_window(
+            self,
+            input: pl.Tensor[[48, 64], pl.FP32],
+            output: pl.Tensor[[48, 64], pl.FP32],
+        ):
+            plm.dump_tensor(input, offsets=[8, 12], shapes=[20, 24])
+            tile = pl.load(input, offsets=[0, 0], shapes=[16, 16])
+            pl.store(tile, offsets=[0, 0], shapes=[16, 16], output_tensor=output)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(DumpWindowProgram)
+
+    codegen_obj = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+
+    assert mlir_code.count("pto.tprint") == 1
+    assert "offsets = [%c8, %c12]" in mlir_code
+    assert "sizes = [%c20, %c24]" in mlir_code
+    assert "!pto.partition_tensor_view<20x24xf32>" in mlir_code
+
+
+def test_pto_codegen_dump_tile_lowering():
+    """plm.dump_tile lowers directly to pto.tprint on the tile value."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class DumpTileProgram:
+        @pl.function
+        def dump_tile_test(
+            self,
+            input: pl.Tensor[[32, 32], pl.FP32],
+            output: pl.Tensor[[32, 32], pl.FP32],
+        ):
+            tile = pl.load(input, offsets=[0, 0], shapes=[16, 16])
+            plm.dump_tile(tile)
+            pl.store(tile, offsets=[0, 0], shapes=[16, 16], output_tensor=output)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(DumpTileProgram)
+
+    codegen_obj = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+
+    assert mlir_code.count("pto.tprint") == 1
+    assert "pto.tprint ins(" in mlir_code
+    assert "pto.tprint ins()" not in mlir_code
 
 
 def test_pto_codegen_block_mul():

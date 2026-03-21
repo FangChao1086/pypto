@@ -469,7 +469,7 @@ def _normalize_arch(arch: str | None) -> str:
     return value
 
 
-def _build_bisheng_flags(toolkit_home: str, arch: str) -> list[str]:
+def _build_bisheng_flags(toolkit_home: str, arch: str, enable_print_debug: bool = False) -> list[str]:
     """Build bisheng flags for single-command shared-library compilation."""
     arch = _normalize_arch(arch)
     common = [
@@ -481,6 +481,12 @@ def _build_bisheng_flags(toolkit_home: str, arch: str) -> list[str]:
         "-std=c++17",
         f"-I{toolkit_home}/include",
     ]
+    if enable_print_debug:
+        common.extend([
+            "--cce-enable-print",
+            "-D_DEBUG",
+            "-DPTOAS_ENABLE_CCE_PRINT=1",
+        ])
     if arch == "dav-c220":
         return ["--cce-aicore-arch=dav-c220", "--cce-fatobj-link", *common]
     if arch == "dav-c220-vec":
@@ -490,7 +496,14 @@ def _build_bisheng_flags(toolkit_home: str, arch: str) -> list[str]:
     raise ValueError(f"Unsupported arch for _build_bisheng_flags: {arch}")
 
 
-def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220", has_cross_sync = False):
+def compile(
+    prog,
+    clean_up=False,
+    timeout=20,
+    arch: str = "dav-c220",
+    has_cross_sync=False,
+    enable_print_debug: bool = False,
+):
     """Compile a PTO program to a shared library.
 
     Args:
@@ -501,6 +514,7 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220", has_cross_
             - "dav-c220-vec": Vector operations only (add, mul, etc.)
             - "dav-c220-cube": Cube operations only (matmul, etc.)
             - "dav-c220": Mixed vector and cube operations (default)
+        enable_print_debug: Enable device-side debug printing support for TPRINT-based kernels.
     """
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.PTO)
@@ -577,7 +591,7 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220", has_cross_
     ]
     
     arch = _normalize_arch(arch)
-    flags = _build_bisheng_flags(PTO_LIB_PATH, arch)
+    flags = _build_bisheng_flags(PTO_LIB_PATH, arch, enable_print_debug=enable_print_debug)
     flags.extend(runtime_includes)
     result = subprocess.run(
         ["bisheng", *flags, final_kernel, "-L", LD_LIB_PATH, "-lruntime", "-o", lib_path],

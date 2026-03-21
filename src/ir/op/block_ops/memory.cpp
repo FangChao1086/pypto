@@ -249,6 +249,16 @@ TypePtr DeduceBlockAllocType(const std::vector<ExprPtr>& args,
   return GetMemRefType();
 }
 
+TypePtr DeduceBlockPrintType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs,
+                             const std::string& op_name) {
+  CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument, but got " << args.size();
+  auto tile_type = As<TileType>(args[0]->GetType());
+  CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+                   << args[0]->GetType()->TypeName();
+  return GetUnknownType();
+}
+
 TypePtr DeduceBlockCreateTileType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
                                   const std::string& op_name) {
@@ -517,6 +527,15 @@ REGISTER_OP("block.full")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockFullType(args, kwargs, "block.full");
+    });
+
+REGISTER_OP("block.print")
+    .set_op_category("BlockOp")
+    .set_description("Print a tile for debugging")
+    .add_argument("tile", "Input tile (TileType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockPrintType(args, kwargs, "block.print");
     });
 }  // namespace ir
 }  // namespace pypto

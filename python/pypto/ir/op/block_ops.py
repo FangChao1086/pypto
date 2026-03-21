@@ -19,7 +19,7 @@ from typing import Any, Literal, Optional, Sequence, Union
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, MemorySpace, Span
+from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, MemorySpace, Span, TileType
 
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 
@@ -236,6 +236,14 @@ def l0c_store(
     return _ir_core.create_op_call(
         "block.l0c_store", [tile, offsets_tuple, shapes_tuple, output_tensor], {}, actual_span
     )
+
+
+def print_(tile: Expr, span: Span | None = None) -> Call:
+    """Print a tile for debugging."""
+    actual_span = _get_span_or_capture(span)
+    if not isinstance(tile.type, TileType):
+        raise TypeError(f"block.print requires TileType input, but got {type(tile.type).__name__}")
+    return _ir_core.create_op_call("block.print", [tile], {}, actual_span)
 
 
 def move(

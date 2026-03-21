@@ -2277,9 +2277,11 @@ class ASTParser:
                 # Remove TileType from args, keep addr and size
                 args = args[1:]
 
+        ir_op_name = self._BLOCK_OP_NAME_MAP.get(op_name, op_name)
+
         # Call the appropriate block operation
-        if hasattr(ir_op.block, op_name):
-            op_func = getattr(ir_op.block, op_name)
+        if hasattr(ir_op.block, ir_op_name):
+            op_func = getattr(ir_op.block, ir_op_name)
             call_span = self.span_tracker.get_span(call)
             return op_func(*args, **kwargs, span=call_span)
 
@@ -2341,6 +2343,11 @@ class ASTParser:
     _MANUAL_AS_BLOCK_OPS: frozenset[str] = frozenset({
         "make_tile",  # allocation — same IR op as SSA
         "l0c_store",    # writes L0C tile to tensor
+        "dump_tile",
+    })
+
+    _MANUAL_AS_TENSOR_OPS: frozenset[str] = frozenset({
+        "dump_tensor",
     })
 
     def _parse_manual_op(self, op_name: str, call: ast.Call) -> ir.Expr:
@@ -2363,6 +2370,8 @@ class ASTParser:
         # Ops with SSA block semantics — no explicit output tile needed.
         if op_name in self._MANUAL_AS_BLOCK_OPS:
             return self._parse_block_op(op_name, call)
+        if op_name in self._MANUAL_AS_TENSOR_OPS:
+            return self._parse_tensor_op(op_name, call)
 
         args = [self.parse_expression(arg) for arg in call.args]
         kwargs = self._parse_op_kwargs(call)
@@ -2405,6 +2414,11 @@ class ASTParser:
     # Maps language-level tensor operation names to IR-level names.
     _TENSOR_OP_NAME_MAP: dict[str, str] = {
         "create_tensor": "create",
+        "dump_tensor": "print_",
+    }
+
+    _BLOCK_OP_NAME_MAP: dict[str, str] = {
+        "dump_tile": "print_",
     }
 
     # Ops that exist only in one module (no dispatch needed).
