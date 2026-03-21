@@ -11,6 +11,7 @@
 
 import pypto
 import pypto.language as pl
+import pypto.language.manual as plm
 import pytest
 from pypto.language.parser.diagnostics import (
     InvalidOperationError,
@@ -132,6 +133,82 @@ class TestErrorCases:
                 # nonexistent_op doesn't exist
                 result: pl.Tensor[[64], pl.FP32] = pl.nonexistent_op(x)  # type: ignore
                 return result
+
+    def test_dump_tensor_requires_offsets_and_shapes_together(self):
+        """dump_tensor should reject partial window specification."""
+
+        with pytest.raises(ParserSyntaxError, match="offsets and shapes must be provided together"):
+
+            @pl.function
+            def partial_window(x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:
+                plm.dump_tensor(x, shapes=[16, 16])
+                return x
+
+    def test_dump_tensor_rank_must_match_tensor(self):
+        """dump_tensor window rank should match the tensor rank."""
+
+        with pytest.raises(ParserSyntaxError, match="must match tensor rank"):
+
+            @pl.function
+            def rank_mismatch(x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:
+                plm.dump_tensor(x, offsets=[0], shapes=[16])
+                return x
+
+    def test_dump_tensor_rejects_non_tensor_input(self):
+        """dump_tensor should only accept Tensor inputs."""
+
+        with pytest.raises(ParserSyntaxError, match="requires TensorType input"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def wrong_type(x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                plm.dump_tensor(x)  # type: ignore[arg-type]
+                return x
+
+    def test_dump_tensor_rejects_dynamic_window(self):
+        """dump_tensor v1 only supports static offsets/shapes."""
+
+        with pytest.raises(ParserSyntaxError, match="static offsets"):
+
+            @pl.function
+            def dynamic_window(
+                x: pl.Tensor[[32, 32], pl.FP32],
+                i: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                plm.dump_tensor(x, offsets=[i, 0], shapes=[16, 16])
+                return x
+
+    def test_dump_tensor_window_requires_innermost_stride_one(self):
+        """dump_tensor windowed mode should reject non-contiguous innermost stride."""
+
+        with pytest.raises(ParserSyntaxError, match="innermost stride"):
+
+            @pl.function
+            def bad_stride(
+                x: pl.Tensor[[32, 32], pl.FP32, pl.view(stride=[64, 2])]
+            ) -> pl.Tensor[[32, 32], pl.FP32, pl.view(stride=[64, 2])]:
+                plm.dump_tensor(x, offsets=[0, 0], shapes=[16, 16])
+                return x
+
+    def test_dump_tile_rejects_non_tile_input(self):
+        """dump_tile should only accept Tile inputs."""
+
+        with pytest.raises(ParserSyntaxError, match="requires TileType input"):
+
+            @pl.function
+            def wrong_dump_tile(x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:
+                plm.dump_tile(x)  # type: ignore[arg-type]
+                return x
+
+    def test_dump_tile_requires_offsets_and_shapes_together(self):
+        """dump_tile should reject partial window specification."""
+
+        with pytest.raises(ParserSyntaxError, match="offsets and shapes must be provided together"):
+
+            @pl.function
+            def partial_tile_window(x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:
+                tile = pl.load(x, offsets=[0, 0], shapes=[16, 16])
+                plm.dump_tile(tile, offsets=[0, 0])
+                return x
 
 
 class TestSSAValidation:

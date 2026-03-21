@@ -217,6 +217,62 @@ TypePtr DeduceBlockAllocType(const std::vector<ExprPtr>& args,
   return GetMemRefType();
 }
 
+TypePtr DeduceBlockPrintType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs,
+                             const std::string& op_name) {
+  CHECK(args.size() == 1 || args.size() == 3)
+      << "The operator " << op_name << " requires 1 argument (tile) or 3 arguments "
+      << "(tile, offsets, shapes), but got " << args.size();
+  auto tile_type = As<TileType>(args[0]->GetType());
+  CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+                   << args[0]->GetType()->TypeName();
+
+  if (args.size() == 3) {
+    auto offsets = As<MakeTuple>(args[1]);
+    CHECK(offsets) << "The operator " << op_name << " requires second argument to be a MakeTuple (offsets)";
+
+    auto shapes = As<MakeTuple>(args[2]);
+    CHECK(shapes) << "The operator " << op_name << " requires third argument to be a MakeTuple (shapes)";
+
+    const size_t rank = tile_type->shape_.size();
+    CHECK(rank == 2) << "The operator " << op_name << " currently only supports 2D tile windows, but got rank "
+                     << rank;
+    CHECK(offsets->elements_.size() == rank)
+        << "The operator " << op_name << " offsets count (" << offsets->elements_.size()
+        << ") must match tile rank (" << rank << ")";
+    CHECK(shapes->elements_.size() == rank)
+        << "The operator " << op_name << " shapes count (" << shapes->elements_.size()
+        << ") must match tile rank (" << rank << ")";
+
+    for (size_t i = 0; i < rank; ++i) {
+      auto offset_scalar = As<ScalarType>(offsets->elements_[i]->GetType());
+      CHECK(offset_scalar) << "The operator " << op_name << " offset element " << i
+                           << " must be ScalarType, but got "
+                           << offsets->elements_[i]->GetType()->TypeName();
+      CHECK(offset_scalar->dtype_.IsInt())
+          << "The operator " << op_name << " offset element " << i
+          << " must have integer dtype, but got " << offset_scalar->dtype_.ToString();
+      CHECK(As<ConstInt>(offsets->elements_[i]))
+          << "The operator " << op_name << " currently only supports static offsets; axis " << i
+          << " is dynamic";
+
+      auto shape_scalar = As<ScalarType>(shapes->elements_[i]->GetType());
+      CHECK(shape_scalar) << "The operator " << op_name << " shape element " << i
+                          << " must be ScalarType, but got "
+                          << shapes->elements_[i]->GetType()->TypeName();
+      CHECK(shape_scalar->dtype_.IsInt())
+          << "The operator " << op_name << " shape element " << i
+          << " must have integer dtype, but got " << shape_scalar->dtype_.ToString();
+      auto shape_const = As<ConstInt>(shapes->elements_[i]);
+      CHECK(shape_const) << "The operator " << op_name << " currently only supports static shapes; axis " << i
+                         << " is dynamic";
+      CHECK(shape_const->value_ > 0) << "The operator " << op_name << " shape element " << i
+                                     << " must be positive, got " << shape_const->value_;
+    }
+  }
+  return GetUnknownType();
+}
+
 TypePtr DeduceBlockCreateTileType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
                                   const std::string& op_name) {
@@ -483,6 +539,17 @@ REGISTER_OP("block.full")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockFullType(args, kwargs, "block.full");
+    });
+
+REGISTER_OP("block.print")
+    .set_op_category("BlockOp")
+    .set_description("Print a tile or tile window for debugging")
+    .add_argument("tile", "Input tile (TileType)")
+    .add_argument("offsets", "Optional static offsets per dimension (MakeTuple of ConstInt)")
+    .add_argument("shapes", "Optional static shape per dimension (MakeTuple of ConstInt)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockPrintType(args, kwargs, "block.print");
     });
 }  // namespace ir
 }  // namespace pypto

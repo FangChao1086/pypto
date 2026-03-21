@@ -471,7 +471,8 @@ def _normalize_arch(arch: str | None) -> str:
     return value
 
 
-def _build_bisheng_flags(toolkit_home: str, arch: str, cpp_content: str, has_cross_sync: bool) -> list[str]:
+def _build_bisheng_flags(toolkit_home: str, arch: str, cpp_content: str, has_cross_sync: bool,
+                         enable_print_debug: bool) -> list[str]:
     """Build bisheng flags for single-command shared-library compilation.
 
     Determines the npu_arch from the arch ('a2'/'a3'/'a5') and the presence
@@ -509,13 +510,19 @@ def _build_bisheng_flags(toolkit_home: str, arch: str, cpp_content: str, has_cro
         "-std=c++17",
         f"-I{toolkit_home}/include",
     ]
+    if enable_print_debug:
+        common.extend([
+            "--cce-enable-print",
+            "-D_DEBUG",
+            "-DPTOAS_ENABLE_CCE_PRINT=1",
+        ])
     flags = [f"--cce-aicore-arch={npu_arch}"]
     if has_cube and has_vec:
         flags.append("--cce-fatobj-link")
     return [*flags, *common]
 
 
-def compile(prog, clean_up=False, timeout=20, arch: str = "a3"):
+def compile(prog, clean_up=False, timeout=20, arch: str = "a3", enable_print_debug: bool | None = None):
     """Compile a PTO program to a shared library.
 
     Args:
@@ -523,6 +530,10 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3"):
         clean_up: Whether to remove intermediate files after compilation.
         timeout: Compilation timeout in seconds.
         arch: Target architecture. Options: "a2", "a3", "a5".
+        enable_print_debug:
+            - None: auto-enable when PTO MLIR contains `pto.tprint` or `pto.print`
+            - True: force enable device-side debug printing flags
+            - False: force disable device-side debug printing flags
     """
     arch = _normalize_arch(arch)
     backend.reset_for_testing()
@@ -544,6 +555,7 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3"):
 
     # Auto-detect cross-core sync from IR
     has_cross_sync = "pto.sync.set" in mlir_code
+    needs_print_debug = ("pto.tprint" in mlir_code) or ("pto.print" in mlir_code)
     if has_cross_sync:
         mlir_code = _inject_set_ffts_to_mlir(mlir_code)
     with open(ir_path, "w") as f:
@@ -600,7 +612,14 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3"):
         f"-I{ASCEND_HOME_PATH}/include/experiment/msprof",
     ]
     
-    flags = _build_bisheng_flags(PTO_LIB_PATH, arch, content, has_cross_sync)
+    resolved_enable_print_debug = needs_print_debug if enable_print_debug is None else enable_print_debug
+    flags = _build_bisheng_flags(
+        PTO_LIB_PATH,
+        arch,
+        content,
+        has_cross_sync,
+        enable_print_debug=resolved_enable_print_debug,
+    )
     flags.extend(runtime_includes)
     result = subprocess.run(
         ["bisheng", *flags, final_kernel, "-L", LD_LIB_PATH, "-lruntime", "-o", lib_path],

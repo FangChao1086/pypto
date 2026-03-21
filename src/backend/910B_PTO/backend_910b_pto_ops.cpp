@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <sstream>
@@ -33,6 +34,7 @@ using ir::As;
 using ir::CallPtr;
 using ir::PipeType;
 using ir::PtrType;
+using ir::TileType;
 using ir::TensorType;
 using ir::Var;
 
@@ -228,10 +230,179 @@ static std::string MakeMrgSortCodegenPTO(const std::string& pto_op_name, const C
 static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                        codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 1) << "Operation:" << pto_op_name << "] requires 1 argument, but got "
-                               << op->args_.size();
+  CHECK(op->args_.size() == 1 || op->args_.size() == 3)
+      << "Operation:[" << pto_op_name << "] requires 1 argument (tile) or 3 arguments "
+      << "(tile, offsets, shapes), but got " << op->args_.size();
+
+  auto memory_space_to_mlir = [](ir::MemorySpace space) {
+    if (space == ir::MemorySpace::DDR) return std::string("gm");
+    if (space == ir::MemorySpace::Vec) return std::string("vec");
+    if (space == ir::MemorySpace::Mat) return std::string("mat");
+    if (space == ir::MemorySpace::Left) return std::string("left");
+    if (space == ir::MemorySpace::Right) return std::string("right");
+    if (space == ir::MemorySpace::Acc) return std::string("acc");
+    return std::string("vec");
+  };
+  auto tile_layout_to_str = [](ir::TileLayout layout) {
+    if (layout == ir::TileLayout::row_major) return std::string("row_major");
+    if (layout == ir::TileLayout::col_major) return std::string("col_major");
+    return std::string("none_box");
+  };
+  auto get_const_or_default = [](const ir::ExprPtr& expr, int64_t default_value) {
+    if (auto const_int = As<ir::ConstInt>(expr)) {
+      return const_int->value_;
+    }
+    return default_value;
+  };
+  auto build_tile_buf_type = [&](const TileType* tile_type, const ir::MakeTuple* shapes_tuple = nullptr,
+                                 const ir::MakeTuple* offsets_tuple = nullptr) {
+    INTERNAL_CHECK(tile_type) << "tile type must not be null";
+    INTERNAL_CHECK(tile_type->shape_.size() == 2) << "block.print tile window currently only supports 2D tiles";
+    std::string loc = tile_type->memref_.has_value()
+                          ? memory_space_to_mlir(tile_type->memref_.value()->memory_space_)
+                          : "vec";
+    std::string dtype_str = codegen.GetTypeString(tile_type->dtype_);
+    int64_t rows = get_const_or_default(tile_type->shape_[0], 32);
+    int64_t cols = get_const_or_default(tile_type->shape_[1], 32);
+    int64_t v_row = rows;
+    int64_t v_col = cols;
+    ir::TileLayout blayout = ir::TileLayout::row_major;
+    ir::TileLayout slayout = ir::TileLayout::none_box;
+    uint64_t fractal = 512;
+    ir::TilePad pad = ir::TilePad::null;
+    if (tile_type->tile_view_.has_value()) {
+      const auto& tile_view = tile_type->tile_view_.value();
+      if (tile_view.valid_shape.size() == 2) {
+        v_row = get_const_or_default(tile_view.valid_shape[0], v_row);
+        v_col = get_const_or_default(tile_view.valid_shape[1], v_col);
+      }
+      blayout = tile_view.blayout;
+      slayout = tile_view.slayout;
+      fractal = tile_view.fractal;
+      pad = tile_view.pad;
+    }
+    if (shapes_tuple != nullptr) {
+      rows = get_const_or_default(shapes_tuple->elements_[0], rows);
+      cols = get_const_or_default(shapes_tuple->elements_[1], cols);
+      v_row = rows;
+      v_col = cols;
+      if (offsets_tuple != nullptr && tile_type->tile_view_.has_value() &&
+          tile_type->tile_view_->valid_shape.size() == 2) {
+        int64_t src_valid_row = get_const_or_default(tile_type->tile_view_->valid_shape[0], rows);
+        int64_t src_valid_col = get_const_or_default(tile_type->tile_view_->valid_shape[1], cols);
+        int64_t row_off = get_const_or_default(offsets_tuple->elements_[0], 0);
+        int64_t col_off = get_const_or_default(offsets_tuple->elements_[1], 0);
+        v_row = std::max<int64_t>(0, std::min<int64_t>(rows, src_valid_row - row_off));
+        v_col = std::max<int64_t>(0, std::min<int64_t>(cols, src_valid_col - col_off));
+      }
+    }
+    std::ostringstream oss;
+    oss << "!pto.tile_buf<loc=" << loc << ", dtype=" << dtype_str;
+    oss << ", rows=" << rows << ", cols=" << cols;
+    oss << ", v_row=" << v_row << ", v_col=" << v_col;
+    oss << ", blayout=" << tile_layout_to_str(blayout);
+    oss << ", slayout=" << tile_layout_to_str(slayout);
+    oss << ", fractal=" << fractal << ", pad=" << static_cast<int>(pad) << ">";
+    return oss.str();
+  };
+
   std::string src = codegen.GetExprAsCode(op->args_[0]);
-  codegen.Emit(pto_op_name + " ins(" + src + " | !pto.partition_tensor_view<MxNxdtype>)");
+  if (op->args_.size() == 3) {
+    auto tile_type = As<TileType>(op->args_[0]->GetType());
+    INTERNAL_CHECK(tile_type) << "block.print first argument must have TileType";
+    auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
+    INTERNAL_CHECK(offsets_tuple) << "block.print second argument must be a tuple (offsets)";
+    auto shapes_tuple = As<ir::MakeTuple>(op->args_[2]);
+    INTERNAL_CHECK(shapes_tuple) << "block.print third argument must be a tuple (shapes)";
+
+    std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+    if (src_type.empty()) {
+      src_type = build_tile_buf_type(tile_type.get());
+    }
+    std::string subset_type = build_tile_buf_type(tile_type.get(), shapes_tuple.get(), offsets_tuple.get());
+    std::string subset = codegen.NewTemp();
+    std::ostringstream subset_line;
+    subset_line << subset << " = pto.subset " << src << "[";
+    for (size_t i = 0; i < offsets_tuple->elements_.size(); ++i) {
+      if (i > 0) subset_line << ", ";
+      subset_line << codegen.GetExprAsCode(offsets_tuple->elements_[i]);
+    }
+    subset_line << "] sizes [";
+    for (size_t i = 0; i < shapes_tuple->elements_.size(); ++i) {
+      if (i > 0) subset_line << ", ";
+      auto dim = As<ir::ConstInt>(shapes_tuple->elements_[i]);
+      INTERNAL_CHECK(dim) << "block.print shape must be static ConstInt at axis " << i;
+      subset_line << dim->value_;
+    }
+    subset_line << "] : " << src_type;
+    codegen.Emit(subset_line.str());
+    codegen.Emit(pto_op_name + " ins(" + subset + " : " + subset_type + ")");
+    return "";
+  }
+
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  if (!src_type.empty()) {
+    codegen.Emit(pto_op_name + " ins(" + src + " : " + src_type + ")");
+  } else if (auto tile_type = As<TileType>(op->args_[0]->GetType()); tile_type &&
+             tile_type->shape_.size() == 2) {
+    codegen.Emit(pto_op_name + " ins(" + src + " : " + build_tile_buf_type(tile_type.get()) + ")");
+  } else {
+    codegen.Emit(pto_op_name + " ins(" + src + ")");
+  }
+  return "";
+}
+
+static std::string GetStaticPartitionType(const ir::MakeTuple* shapes_tuple, const std::string& dtype_str) {
+  std::ostringstream oss;
+  oss << "!pto.partition_tensor_view<";
+  for (size_t i = 0; i < shapes_tuple->elements_.size(); ++i) {
+    if (i > 0) oss << "x";
+    auto dim = As<ir::ConstInt>(shapes_tuple->elements_[i]);
+    INTERNAL_CHECK(dim) << "partition shape must be static ConstInt at axis " << i;
+    oss << dim->value_;
+  }
+  oss << "x" << dtype_str << ">";
+  return oss.str();
+}
+
+static std::string MakeTensorPrintCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "tensor.print requires 3 arguments, but got " << op->args_.size();
+
+  auto tensor = As<Var>(op->args_[0]);
+  INTERNAL_CHECK(tensor) << "tensor.print first argument must be a Var";
+
+  auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
+  INTERNAL_CHECK(offsets_tuple) << "tensor.print second argument must be a tuple (offsets)";
+
+  auto shapes_tuple = As<ir::MakeTuple>(op->args_[2]);
+  INTERNAL_CHECK(shapes_tuple) << "tensor.print third argument must be a tuple (shapes)";
+
+  auto tensor_type = As<TensorType>(tensor->GetType());
+  INTERNAL_CHECK(tensor_type) << "tensor.print tensor argument must have TensorType";
+
+  std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
+  std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
+  std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
+  std::string partition_type = GetStaticPartitionType(shapes_tuple.get(), dtype_str);
+
+  std::string partition_view = codegen.NewTemp();
+  std::ostringstream partition_line;
+  partition_line << partition_view << " = pto.partition_view " << tensor_view;
+  partition_line << ", offsets = [";
+  for (size_t i = 0; i < offsets_tuple->elements_.size(); ++i) {
+    if (i > 0) partition_line << ", ";
+    partition_line << codegen.GetExprAsCode(offsets_tuple->elements_[i]);
+  }
+  partition_line << "], sizes = [";
+  for (size_t i = 0; i < shapes_tuple->elements_.size(); ++i) {
+    if (i > 0) partition_line << ", ";
+    partition_line << codegen.GetExprAsCode(shapes_tuple->elements_[i]);
+  }
+  partition_line << "] : " << tensor_view_type << " -> " << partition_type;
+  codegen.Emit(partition_line.str());
+
+  codegen.Emit("pto.tprint ins(" + partition_view + " : " + partition_type + ")");
   return "";
 }
 
@@ -602,6 +773,12 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.dim")
     .set_pipe(ir::PipeType::S)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeTensorDimCodegenPTO(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.print")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeTensorPrintCodegenPTO(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.reshape")

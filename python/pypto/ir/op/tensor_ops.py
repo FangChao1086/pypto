@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstInt, Expr, ScalarType, Span
+from pypto.pypto_core.ir import Call, ConstInt, Expr, ScalarType, Span, TensorType
 
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 
@@ -102,6 +102,77 @@ def view(
 
     args = [tensor, shape_tuple, offset_tuple]
     return _ir_core.create_op_call("tensor.view", args, {}, actual_span)
+
+
+def print_(
+    tensor: Expr,
+    offsets: list[int | Expr] | _ir_core.MakeTuple | None = None,
+    shapes: list[int | Expr] | _ir_core.MakeTuple | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Print a tensor or tensor window for debugging.
+
+    Args:
+        tensor: Input tensor expression
+        offsets: Optional static window offsets. Must be provided together with ``shapes``.
+        shapes: Optional static window shape. Must be provided together with ``offsets``.
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for tensor.print
+    """
+    actual_span = _get_span_or_capture(span)
+    tensor_type = tensor.type
+    if not isinstance(tensor_type, TensorType):
+        raise TypeError(
+            f"tensor.print requires TensorType input, but got {type(tensor_type).__name__}"
+        )
+
+    if (offsets is None) != (shapes is None):
+        raise ValueError("tensor.print offsets and shapes must be provided together")
+
+    rank = len(tensor_type.shape)
+    if offsets is None and shapes is None:
+        offsets_tuple = _to_make_tuple([0] * rank, actual_span)
+        shapes_tuple = _to_make_tuple(tensor_type.shape, actual_span)
+    else:
+        if tensor_type.tensor_view is not None and tensor_type.tensor_view.stride:
+            last_stride = tensor_type.tensor_view.stride[-1]
+            if not isinstance(last_stride, ConstInt):
+                raise NotImplementedError(
+                    "tensor.print windowed mode requires the innermost stride to be statically 1"
+                )
+            if last_stride.value != 1:
+                raise ValueError(
+                    f"tensor.print windowed mode requires innermost stride == 1, got {last_stride.value}"
+                )
+        offsets_tuple = _to_make_tuple(offsets, actual_span)
+        shapes_tuple = _to_make_tuple(shapes, actual_span)
+
+    if len(offsets_tuple.elements) != rank or len(shapes_tuple.elements) != rank:
+        raise ValueError(
+            f"tensor.print offsets/shapes must match tensor rank {rank}, got "
+            f"{len(offsets_tuple.elements)} offsets and {len(shapes_tuple.elements)} shapes"
+        )
+
+    for idx, offset_expr in enumerate(offsets_tuple.elements):
+        if not isinstance(offset_expr, ConstInt):
+            raise NotImplementedError(
+                f"tensor.print currently only supports static offsets, got dynamic offset at axis {idx}"
+            )
+
+    for idx, shape_expr in enumerate(shapes_tuple.elements):
+        if not isinstance(shape_expr, ConstInt):
+            raise NotImplementedError(
+                f"tensor.print currently only supports static shapes, got dynamic shape at axis {idx}"
+            )
+        if shape_expr.value <= 0:
+            raise ValueError(
+                f"tensor.print shape at axis {idx} must be positive, got {shape_expr.value}"
+            )
+
+    args = [tensor, offsets_tuple, shapes_tuple]
+    return _ir_core.create_op_call("tensor.print", args, {}, actual_span)
 
 
 def matmul(
