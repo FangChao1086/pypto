@@ -34,12 +34,14 @@ source compile.sh
 ```bash
 python3 tests/ut/frontend/test_dynamic_matmul_db.py
 ```
+For more detailed test info, look at test.md in the directory of this file(CLAUDE.md).
 ### mlir python path
 /data/g00895580/mlir/llvm-project/build-shared/tools/mlir/python_packages/mlir_core/mlir
 
 ## Pipeline and sync
 - TLOAD is PIPE_MTE2, TSTORE_ACC is PIPE_FIX, TMOV_M2L and TMOV_M2B are MTE1, TMOV_M2S and TMOV_V2M are PIPE_FIX, TMOV_M2V is PIPV, TMATMUL is PIPE_M, TVEC and TVECWAIT_EVENT is PIPE_V
 - When a buffer is used within a loop, backward synchronization is needed: at the start of each iteration, execution must wait for all associated pipelines from the previous iteration to have completed before the buffer can be reused.
+- For more hardware info, look at hardware.md in the directory of this file(CLAUDE.md). 
 ## Ascend Npu Harward Core information
 - For AscendNPU, there are multiple cores, each processing a chunk of data. The MatMul operation is computed on Cube cores, while most other operations are computed on Vector cores. The ratio of Cube cores to Vector cores is 1:2.
 - For Cube-Only or Vector-Only operation, use pto.get_block_idx() to get current Cube or vector core index, use pto.get_block_num() to get total living Cube number. Use pto.get_subblock_idx() to get current Vector sub block idx, which is 0 or 1. 

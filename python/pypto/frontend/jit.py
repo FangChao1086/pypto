@@ -471,7 +471,7 @@ def _normalize_arch(arch: str | None) -> str:
     return value
 
 
-def _build_bisheng_flags(toolkit_home: str, arch: str, cpp_content: str) -> list[str]:
+def _build_bisheng_flags(toolkit_home: str, arch: str, cpp_content: str, has_cross_sync: bool) -> list[str]:
     """Build bisheng flags for single-command shared-library compilation.
 
     Determines the npu_arch from the arch ('a2'/'a3'/'a5') and the presence
@@ -482,6 +482,15 @@ def _build_bisheng_flags(toolkit_home: str, arch: str, cpp_content: str) -> list
     has_cube = "__DAV_CUBE__" in cpp_content
     has_vec = "__DAV_VEC__" in cpp_content
 
+    if has_cross_sync and not (has_cube and has_vec):
+        if has_cube:
+            raise ValueError(
+                f"Contains ffts cross sync but vector code is missing."
+            )
+        elif has_vec:
+            raise ValueError(
+                f"Contains ffts cross sync but cube code is missing."
+            )
     if has_cube and has_vec:
         npu_arch = "dav-c220" if arch in ("a2", "a3") else "dav-c310"
     elif has_cube:
@@ -591,7 +600,7 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3"):
         f"-I{ASCEND_HOME_PATH}/include/experiment/msprof",
     ]
     
-    flags = _build_bisheng_flags(PTO_LIB_PATH, arch, content)
+    flags = _build_bisheng_flags(PTO_LIB_PATH, arch, content, has_cross_sync)
     flags.extend(runtime_includes)
     result = subprocess.run(
         ["bisheng", *flags, final_kernel, "-L", LD_LIB_PATH, "-lruntime", "-o", lib_path],

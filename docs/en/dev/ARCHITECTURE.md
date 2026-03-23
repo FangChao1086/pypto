@@ -314,6 +314,108 @@ Pipeline types for synchronization:
 - `MTE2` (TLOAD), `MTE1` (TMOV_M2L, TMOV_M2B), `PIPE_FIX` (TSTORE_ACC, TMOV_M2S, TMOV_V2M)
 - `PIPE_M` (TMATMUL), `PIPE_V` (TVEC, TVECWAIT_EVENT)
 
+### Tile Layout for Cube Matmul (blayout / slayout)
+
+The Cube matmul operates on data in **NZ (fractal) format**. Each memory buffer requires specific `blayout` (block layout) and `slayout` (scatter layout) settings. **Omitting these parameters causes completely wrong results.**
+
+| Memory | blayout | slayout | fractal | Notes |
+|--------|---------|---------|---------|-------|
+| MAT (L1) | 2 (col_major) | 1 (row_major) | 512 | NZ format for data loading |
+| LEFT (L0A) | 1 (row_major) | 1 (row_major) | 512 | Left matmul operand |
+| RIGHT (L0B) | 1 (row_major) | 2 (col_major) | 512 | Right matmul operand |
+| ACC (L0C) | 2 (col_major) | 1 (row_major) | 1024 | FP32 accumulator (fractal=1024) |
+| VEC (UB) | default | default | 512 | Simple row-major for vector ops |
+
+#### Fractal Format Concepts
+
+The Cube unit processes data in **16×16 fractal blocks**. A tile (e.g. 64×64) is divided into a grid of these blocks. The two layout parameters control their physical arrangement:
+
+- **blayout (Block Layout)**: Order of fractal blocks in the tile grid.
+
+| Value | Name | Meaning |
+|-------|------|---------|
+| 0 | `none_box` | No special arrangement |
+| 1 | `row_major` | Blocks stored row by row: `B[0,0], B[0,1], B[0,2], ...` |
+| 2 | `col_major` | Blocks stored column by column: `B[0,0], B[1,0], B[2,0], ...` (NZ format) |
+
+- **slayout (Scatter Layout)**: Element order within each 16×16 fractal block.
+
+| Value | Name | Meaning |
+|-------|------|---------|
+| 0 | `none_box` | No scatter, simple packed layout |
+| 1 | `row_major` | Elements within block stored row-major |
+| 2 | `col_major` | Elements within block stored column-major |
+
+- **fractal**: Block size in bytes. FP16: `512` (16×16×2). FP32: `1024` (16×16×4).
+
+#### Per-Memory-Space Layout Rationale
+
+**MAT (L1)** — `blayout=2, slayout=1` (NZ format)
+
+Data loaded from GM via TLOAD is stored in NZ format. TMOV to L0A/L0B expects this format as input.
+
+```
+Logical:                 Physical (col_major block order):
+[B00 B01 B02 B03]       B00 → B10 → B20 → B30 → B01 → B11 → ...
+[B10 B11 B12 B13]       Each block: row-major 16×16 elements
+[B20 B21 B22 B23]
+[B30 B31 B32 B33]
+```
+
+**LEFT (L0A)** — `blayout=1, slayout=1` (all row-major)
+
+The left operand A in A×B needs rows accessible sequentially for the Cube's inner product.
+
+**RIGHT (L0B)** — `blayout=1, slayout=2` (row-major blocks, col-major scatter)
+
+The right operand B in A×B needs columns accessible within each fractal block for the Cube's dot-product access pattern.
+
+**ACC (L0C)** — `blayout=2, slayout=1, fractal=1024`
+
+Same NZ format as MAT, but uses `fractal=1024` because FP32 elements are 4 bytes (16×16×4 = 1024).
+
+**VEC (UB)** — defaults
+
+Vector operations work on contiguous row-major data; no fractal format needed.
+
+#### Code Example
+
+```python
+TILE = 64
+TT2 = TILE * TILE * 2   # FP16 tile bytes (8192)
+TT4 = TILE * TILE * 4   # FP32 tile bytes (16384)
+
+# MAT tiles (blayout=2, slayout=1)
+mat_type = plm.TileType(shape=[TILE, TILE], dtype=pl.FP16,
+    target_memory=pl.MemorySpace.Mat, blayout=2, slayout=1)
+a_mat = plm.make_tile(mat_type, addr=0, size=TT2)
+
+# LEFT (blayout=1, slayout=1)
+a_left = plm.make_tile(plm.TileType(shape=[TILE, TILE], dtype=pl.FP16,
+    target_memory=pl.MemorySpace.Left, blayout=1, slayout=1), addr=0, size=TT2)
+
+# RIGHT (blayout=1, slayout=2)
+b_right = plm.make_tile(plm.TileType(shape=[TILE, TILE], dtype=pl.FP16,
+    target_memory=pl.MemorySpace.Right, blayout=1, slayout=2), addr=0, size=TT2)
+
+# ACC (blayout=2, slayout=1, fractal=1024 for FP32)
+c_acc = plm.make_tile(plm.TileType(shape=[TILE, TILE], dtype=pl.FP32,
+    target_memory=pl.MemorySpace.Acc, blayout=2, slayout=1, fractal=1024), addr=0, size=TT4)
+
+# VEC (defaults — no blayout/slayout needed)
+vec_tile = plm.make_tile(plm.TileType(shape=[32, TILE], dtype=pl.FP32,
+    target_memory=pl.MemorySpace.Vec), addr=0, size=32*TILE*4)
+```
+
+#### Common Mistakes
+
+| Mistake | Consequence | Fix |
+|---------|-------------|-----|
+| MAT without blayout/slayout | Matmul produces completely wrong values | `blayout=2, slayout=1` |
+| RIGHT with `slayout=1` | Wrong right-operand format → wrong result | `slayout=2` |
+| ACC with `fractal=512` | FP32 fractal size wrong | `fractal=1024` |
+| VEC with `blayout=2` | Vector ops read garbled data | Use defaults |
+
 ---
 
 ## Build & Test
