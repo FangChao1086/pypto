@@ -955,5 +955,57 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "manual.transpose")
       return MakeManualUnaryPTO("pto.ttrans", op, codegen);
     });
 
+// ----------------------------------------------------------------------------
+// Synchronization
+// ----------------------------------------------------------------------------
+
+static std::string MakeManualSyncPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  
+  const std::string& sync_type = op->GetKwarg<std::string>("sync_type");
+  
+  std::ostringstream oss;
+  
+  if (sync_type == "inner_core_sync") {
+    // 检查是否有pipeline参数
+    if (op->HasKwarg("pipeline")) {
+      const std::string& pipeline = op->GetKwarg<std::string>("pipeline");
+      
+      // 方案一：直接使用流水线类型，不需要映射到操作类型
+      oss << "pto.barrier_sync [#pto<pipe " << pipeline << ">]";
+    } else {
+      // 向后兼容：无pipeline参数，默认PIPE_ALL
+      oss << "pto.barrier_sync [#pto<pipe PIPE_ALL>]";
+    }
+  } else if (sync_type == "cross_core_sync_forward") {
+    int event_id = op->GetKwarg<int>("event_id");
+    oss << "pto.record_event [#pto<sync_op_type TMATMUL>, #pto<sync_op_type TVEC>, #pto<event EVENT_ID" << event_id << ">]";
+  } else if (sync_type == "cross_core_sync_both") {
+    int event_id = op->GetKwarg<int>("event_id");
+    const std::string& direction = op->GetKwarg<std::string>("direction");
+    
+    if (direction == "record") {
+      oss << "pto.record_event [#pto<sync_op_type TMATMUL>, #pto<sync_op_type TVEC>, #pto<event EVENT_ID" << event_id << ">]";
+    } else if (direction == "allocate") {
+      oss << "pto.wait_event [#pto<sync_op_type TMATMUL>, #pto<sync_op_type TVEC>, #pto<event EVENT_ID" << event_id << ">]";
+    } else {
+      LOG_ERROR << "manual.sync: unknown direction '" << direction << "'";
+      return "";
+    }
+  } else {
+    LOG_ERROR << "manual.sync: unknown sync_type '" << sync_type << "'";
+    return "";
+  }
+  
+  codegen.Emit(oss.str());
+  return "";
+}
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "manual.sync")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualSyncPTO(op, codegen);
+    });
+
 }  // namespace backend
 }  // namespace pypto

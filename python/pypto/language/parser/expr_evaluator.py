@@ -119,12 +119,17 @@ class ExprEvaluator:
         """Convert a Python value to an IR expression.
 
         Args:
-            value: Python value (bool, int, float, ir.Expr, DynVar, list, or tuple)
-            span: Source span for the expression
+            value: Python value (bool, int, float, ir.Expr, DynVar, list, tuple, or Enum)
+            span: Source span for expression
 
         Returns:
-            IR expression representing the value
+            IR expression representing value
         """
+        # Handle Enum types (e.g., MemorySpace.Vec, SyncType.INNER_CORE_SYNC)
+        from enum import Enum as PyEnum
+        if isinstance(value, PyEnum):
+            return self.python_value_to_ir(value.value, span)
+        
         # bool before int because isinstance(True, int) is True
         if isinstance(value, bool):
             return ir.ConstBool(value, span)
@@ -141,7 +146,7 @@ class ExprEvaluator:
         raise ParserTypeError(
             f"Unsupported closure variable type: {type(value).__name__}",
             span=span,
-            hint="Closure variables must be int, float, bool, list, tuple, or IR expressions",
+            hint="Closure variables must be int, float, bool, list, tuple, Enum, or IR expressions",
         )
 
     def try_eval_as_ir(self, node: ast.expr) -> ir.Expr | None:
