@@ -137,7 +137,7 @@ def mul_kernel(
 
 
 # Kernel 4: unary neg
-@fe.kernel
+@fe.kernel(auto_sync=True)
 def neg_kernel(
     a: pl.Tensor[[64, 128], pl.FP16],
 ) -> pl.Tensor[[64, 128], pl.FP16]:

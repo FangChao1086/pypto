@@ -80,6 +80,8 @@ def kernel(
     name: Optional[str] = None,
     type: ir.FunctionType = ir.FunctionType.Opaque,
     strict_ssa: bool = False,
+    auto_sync: bool = False,
+    npu_arch: str | None = None,
 ) -> ir.Program:
     """Decorator that parses a single DSL function and wraps it in a Program.
 
@@ -92,6 +94,10 @@ def kernel(
         name: Optional program name (defaults to function name)
         type: Function type (Opaque, Orchestration, or InCore)
         strict_ssa: If True, enforce SSA (single assignment per variable).
+        auto_sync: If True, enable automatic intra-pipeline synchronization.
+        npu_arch: Target architecture (e.g. ``"dav-2201"``, ``"a3"``, ``"dav-3510"``).
+            Controls whether same-pipeline syncs are emitted (required for a2/a3,
+            not needed for a5). Only meaningful when ``auto_sync=True``.
 
     Returns:
         ir.Program containing the single parsed function
@@ -108,6 +114,12 @@ def kernel(
         >>> @fe.kernel(name="my_program", type=fe.FunctionType.InCore)
         ... def compute(x: fe.Tensor[[64], fe.FP32]) -> fe.Tensor[[64], fe.FP32]:
         ...     return x
+
+        >>> @fe.kernel(auto_sync=True)
+        ... def auto_sync_kernel(x: fe.Tensor[[64], fe.FP32]) -> fe.Tensor[[64], fe.FP32]:
+        ...     tile = fe.load(x, [0], [64])
+        ...     result = fe.add(tile, tile)
+        ...     return fe.store(result, [0], [64], x)
     """
 
     # Capture caller's scope so the parser can resolve names like `pl`, `plm`, etc.
@@ -145,6 +157,8 @@ def kernel(
                 col_offset,
                 strict_ssa=strict_ssa,
                 closure_vars=closure_vars,
+                auto_sync=auto_sync,
+                npu_arch=npu_arch,
             )
 
             try:

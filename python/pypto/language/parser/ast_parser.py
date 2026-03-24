@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
 from pypto.pypto_core import DataType, ir
-from pypto.pypto_core.ir import MemorySpace
+from pypto.pypto_core.ir import MemorySpace, PipeType
 
 _MEMORY_SPACE_MAP: dict[str, MemorySpace] = {
     "Left": MemorySpace.Left,
@@ -64,6 +64,21 @@ def _const_int_value(value: object) -> int | None:
     return None
 
 
+def _arch_needs_same_pipe_sync(npu_arch: str | None) -> bool:
+    """Return True if the architecture requires same-pipeline sync insertion.
+
+    dav-2201 (a2 / a3): The V pipeline does not guarantee intra-pipe
+    completion ordering in hardware; software must insert sync_src/sync_dst
+    even between two consecutive V operations that share a tile.
+
+    dav-3510 (a5): Hardware provides the ordering guarantee automatically.
+    """
+    if npu_arch is None:
+        return False
+    arch = npu_arch.lower()
+    return "dav-2201" in arch or arch in ("a2", "a3")
+
+
 class ASTParser:
     """Parses Python AST and builds IR using IRBuilder."""
 
@@ -77,6 +92,8 @@ class ASTParser:
         gvar_to_func: dict[ir.GlobalVar, ir.Function] | None = None,
         strict_ssa: bool = False,
         closure_vars: dict[str, Any] | None = None,
+        auto_sync: bool = False,
+        npu_arch: str | None = None,
     ):
         """Initialize AST parser.
 
@@ -89,6 +106,9 @@ class ASTParser:
             gvar_to_func: Optional map of GlobalVars to parsed Functions for type inference
             strict_ssa: If True, enforce SSA (single assignment). If False (default), allow reassignment.
             closure_vars: Optional variables from the enclosing scope for dynamic shape resolution
+            auto_sync: If True, automatically insert sync_src/sync_dst for cross-pipeline deps.
+            npu_arch: Target architecture string (e.g. ``"dav-2201"``, ``"a3"``, ``"dav-3510"``).
+                Used to determine whether same-pipeline syncs are needed.
         """
         self.span_tracker = SpanTracker(source_file, source_lines, line_offset, col_offset)
         self.scope_manager = ScopeManager(strict_ssa=strict_ssa)
@@ -131,6 +151,14 @@ class ASTParser:
         # Populated when a simple assignment like `event_ids = (0, 1)` is parsed.
         # Used by the sync-op statement expander to generate per-branch IfStmt chains.
         self._const_tuple_registry: dict[str, list[int]] = {}
+
+        # Auto-sync: track per-tile pipeline state for automatic sync insertion
+        if auto_sync:
+            from pypto.frontend.sync_tracker import SyncTracker
+            same_pipe_sync = _arch_needs_same_pipe_sync(npu_arch)
+            self.sync_tracker: SyncTracker | None = SyncTracker(same_pipe_sync=same_pipe_sync)
+        else:
+            self.sync_tracker = None
 
     def parse_function(
         self,
@@ -448,6 +476,13 @@ class ASTParser:
                 value_expr = self.parse_expression(stmt.value)
                 var = self.builder.let(var_name, value_expr, span=span)
                 self.scope_manager.define_var(var_name, var, span=span)
+
+                # Auto-sync: register tile region for overlap detection
+                if self.sync_tracker is not None and isinstance(stmt.value, ast.Call):
+                    call_op_name = self._extract_plm_or_block_op_name(stmt.value)
+                    if call_op_name == "make_tile":
+                        self._register_tile_region(var_name, var)
+
                 # Register constant-integer tuples for sync-op event_id expansion
                 if isinstance(stmt.value, ast.Tuple) and all(
                     isinstance(elt, ast.Constant) and isinstance(elt.value, int)
@@ -669,6 +704,28 @@ class ASTParser:
         span = self.span_tracker.get_span(stmt)
         loop_output_vars: list[str] = []
 
+        # Auto-sync: pre-scan for backward (cross-iteration) dependencies
+        backward_deps: list = []
+        if self.sync_tracker is not None:
+            from pypto.frontend.sync_tracker import (
+                emit_backward_sync_dst,
+                emit_backward_sync_src,
+                prescan_loop_backward_deps,
+            )
+
+            backward_deps = prescan_loop_backward_deps(
+                stmt.body,
+                self.scope_manager.lookup_var,
+                self.sync_tracker._event_allocator,
+                loop_depth=self.sync_tracker.get_loop_depth(),
+            )
+            # 1. Priming: emit sync_src before the loop so the first
+            #    iteration's wait_flag has a matching set_flag.
+            for dep in backward_deps:
+                emit_backward_sync_src(self.builder, dep, span)
+            # Save pre-loop buffer states
+            self.sync_tracker.enter_loop()
+
         with self.builder.for_loop(
             loop_var,
             range_args["start"],
@@ -693,8 +750,18 @@ class ASTParser:
             prev_yield_types = getattr(self, "_current_yield_types", None)
             self._current_yield_types = {}
 
+            # Auto-sync: backward wait at loop body start
+            if self.sync_tracker is not None:
+                for dep in backward_deps:
+                    emit_backward_sync_dst(self.builder, dep, span)
+
             for body_stmt in stmt.body:
                 self.parse_statement(body_stmt)
+
+            # Auto-sync: backward set at loop body end
+            if self.sync_tracker is not None:
+                for dep in backward_deps:
+                    emit_backward_sync_src(self.builder, dep, span)
 
             loop_output_vars = self._current_yield_vars[:]
             self._current_yield_vars = prev_yield_tracker
@@ -704,6 +771,14 @@ class ASTParser:
             self.scope_manager.exit_scope(leak_vars=should_leak)
             self.in_for_loop = False
             self.current_loop_builder = None
+
+        # Auto-sync: restore pre-loop state and emit drain sync_dst
+        if self.sync_tracker is not None:
+            loop_ctx = self.sync_tracker.exit_loop()
+            # Verify prescan results against actual loop body observations
+            self._verify_backward_deps(backward_deps, loop_ctx)
+            for dep in backward_deps:
+                emit_backward_sync_dst(self.builder, dep, span)
 
         if not is_simple_for:
             loop_result = loop.get_result()
@@ -1082,6 +1157,10 @@ class ASTParser:
         condition = self.parse_expression(stmt.test)
         span = self.span_tracker.get_span(stmt)
 
+        # Auto-sync: save pre-if buffer states
+        if self.sync_tracker is not None:
+            self.sync_tracker.enter_if_branch()
+
         # Track yield output variable names from both branches
         then_yield_vars = []
 
@@ -1120,6 +1199,10 @@ class ASTParser:
 
             # Parse else branch if present
             if stmt.orelse:
+                # Auto-sync: save then-states, restore pre-if for else
+                if self.sync_tracker is not None:
+                    self.sync_tracker.enter_else_branch()
+
                 if_builder.else_()
                 self.scope_manager.enter_scope("else")
                 for else_stmt in stmt.orelse:
@@ -1140,6 +1223,10 @@ class ASTParser:
             # Restore previous yield trackers
             self._current_yield_vars = prev_yield_tracker
             self._current_yield_types = prev_yield_types
+
+        # Auto-sync: merge branch states conservatively
+        if self.sync_tracker is not None:
+            self.sync_tracker.exit_if()
 
         # After if statement completes, register the output variables in the outer scope
         if then_yield_vars:
@@ -2364,6 +2451,10 @@ class ASTParser:
         if op_name in self._MANUAL_AS_BLOCK_OPS:
             return self._parse_block_op(op_name, call)
 
+        # Auto-sync: emit forward sync_src/sync_dst before this op
+        if self.sync_tracker is not None:
+            self._emit_forward_syncs_for_manual_op(op_name, call, span)
+
         args = [self.parse_expression(arg) for arg in call.args]
         kwargs = self._parse_op_kwargs(call)
         # Dispatch to ir_op.manual.<op_name> when a handler exists.
@@ -2384,6 +2475,183 @@ class ASTParser:
         # PTO backend (which expects Var nodes for tile arguments).
 
         return result_expr
+
+    # -- auto-sync helpers ------------------------------------------------
+
+    def _extract_plm_or_block_op_name(self, call: ast.Call) -> str | None:
+        """Extract op name from a ``plm.xxx(...)`` call, or None."""
+        func = call.func
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "plm"
+        ):
+            return func.attr
+        return None
+
+    def _emit_forward_syncs_for_manual_op(
+        self, op_name: str, call: ast.Call, span: ir.Span,
+    ) -> None:
+        """Check for cross-pipeline deps and emit sync_src/sync_dst before a manual op."""
+        from pypto.frontend.sync_tracker import (
+            _OP_TILE_ACCESS,
+            _OP_TO_PIPE,
+            emit_sync_pair,
+            get_move_pipe,
+        )
+
+        # Determine pipeline for this op
+        if op_name == "move":
+            pipe = self._resolve_move_pipe(call)
+        elif op_name in ("store", "store_tile"):
+            pipe = self._resolve_store_pipe(call, op_name)
+        else:
+            pipe = _OP_TO_PIPE.get(op_name)
+        if pipe is None:
+            return
+
+        access = _OP_TILE_ACCESS.get(op_name)
+        if access is None:
+            return
+
+        # Collect tile names from positional args
+        read_names: list[str] = []
+        write_names: list[str] = []
+        for idx in access.read_indices:
+            name = self._extract_tile_name_from_ast(call, idx)
+            if name is not None:
+                read_names.append(name)
+        for idx in access.write_indices:
+            name = self._extract_tile_name_from_ast(call, idx)
+            if name is not None:
+                write_names.append(name)
+
+        assert self.sync_tracker is not None
+        pairs = self.sync_tracker.record_op(pipe, read_names, write_names)
+        for pair in pairs:
+            emit_sync_pair(self.builder, pair, span)
+
+    def _extract_tile_name_from_ast(self, call: ast.Call, idx: int) -> str | None:
+        """Extract a tile variable name from a positional arg at *idx*.
+
+        Returns the name only if the arg is a simple ``ast.Name`` that resolves
+        to a tile ``Var`` (i.e. its IR type is ``TileType``) in the current scope.
+        """
+        if idx >= len(call.args):
+            return None
+        arg = call.args[idx]
+        if not isinstance(arg, ast.Name):
+            return None
+        var = self.scope_manager.lookup_var(arg.id)
+        if var is None:
+            return None
+        var_type = getattr(var, "type", None)
+        if var_type is None:
+            return None
+        if not isinstance(var_type, ir.TileType):
+            return None
+        return arg.id
+
+    def _resolve_move_pipe(self, call: ast.Call) -> PipeType:
+        """Resolve the pipeline for a ``move`` op from its keyword args."""
+        from pypto.frontend.sync_tracker import get_move_pipe
+
+        src_memory: MemorySpace | None = None
+        target_memory: MemorySpace | None = None
+        for kw in call.keywords:
+            if kw.arg == "src_memory" and isinstance(kw.value, ast.Attribute):
+                src_memory = _MEMORY_SPACE_MAP.get(kw.value.attr)
+            elif kw.arg == "target_memory" and isinstance(kw.value, ast.Attribute):
+                target_memory = _MEMORY_SPACE_MAP.get(kw.value.attr)
+        # Also try to resolve from positional arg[1] if it's a memory space
+        if target_memory is None and len(call.args) >= 2:
+            arg1 = call.args[1]
+            if isinstance(arg1, ast.Attribute):
+                target_memory = _MEMORY_SPACE_MAP.get(arg1.attr)
+        # Try to resolve src_memory from the tile's type
+        if src_memory is None and len(call.args) >= 1:
+            arg0 = call.args[0]
+            if isinstance(arg0, ast.Name):
+                var = self.scope_manager.lookup_var(arg0.id)
+                if var is not None:
+                    var_type = getattr(var, "type", None)
+                    if var_type is not None and hasattr(var_type, "memory_space"):
+                        src_memory = var_type.memory_space
+        return get_move_pipe(src_memory, target_memory)
+
+    def _resolve_store_pipe(self, call: ast.Call, op_name: str) -> PipeType:
+        """Resolve the pipeline for a ``store`` / ``store_tile`` op.
+
+        PTOAS rules:
+        - Store from Vec (UB) → PIPE_MTE3 (TSTORE_VEC)
+        - Store from Acc (L0C) → PIPE_FIX (TSTORE_ACC)
+
+        The source tile is DSL arg[1]: ``plm.store(tensor, tile, ...)``.
+        """
+        from pypto.frontend.sync_tracker import get_store_pipe
+
+        # DSL convention: arg[1] is the source tile
+        tile_arg_idx = 1
+        src_memory: MemorySpace | None = None
+        if tile_arg_idx < len(call.args):
+            arg = call.args[tile_arg_idx]
+            if isinstance(arg, ast.Name):
+                var = self.scope_manager.lookup_var(arg.id)
+                if var is not None:
+                    var_type = getattr(var, "type", None)
+                    if var_type is not None and hasattr(var_type, "memory_space"):
+                        src_memory = var_type.memory_space
+        return get_store_pipe(src_memory)
+
+    def _register_tile_region(self, var_name: str, var: ir.Var) -> None:
+        """Extract MemRef from a tile Var and register with sync tracker."""
+        from pypto.frontend.sync_tracker import TileRegion
+
+        var_type = var.type
+        if not isinstance(var_type, ir.TileType):
+            return
+        memref = var_type.memref
+        if memref is None:
+            return
+        addr_offset: int | None = None
+        if isinstance(memref.addr_, ir.ConstInt):
+            addr_offset = memref.addr_.value
+        region = TileRegion(
+            memory_space=memref.memory_space_,
+            addr_offset=addr_offset,
+            byte_size=memref.size_,
+        )
+        assert self.sync_tracker is not None
+        self.sync_tracker.register_tile(var_name, region)
+
+    def _verify_backward_deps(
+        self,
+        prescan_deps: list,
+        loop_ctx: object,
+    ) -> None:
+        """Warn if prescan backward deps differ from actual loop body access."""
+        import warnings
+        from pypto.frontend.sync_tracker import LoopContext
+
+        if not isinstance(loop_ctx, LoopContext):
+            return
+        actual_deps: set[tuple] = set()
+        for tile_name in loop_ctx.first_access:
+            first = loop_ctx.first_access[tile_name]
+            last = loop_ctx.last_access.get(tile_name, first)
+            if first != last:
+                actual_deps.add((first, last, tile_name))
+
+        prescan_set = {(d.first_pipe, d.last_pipe, d.tile_name) for d in prescan_deps}
+        missed = actual_deps - prescan_set
+        if missed:
+            for first, last, name in missed:
+                warnings.warn(
+                    f"Auto-sync: prescan missed backward dep for tile '{name}' "
+                    f"(first={first.name}, last={last.name}). "
+                    f"Consider adding manual sync.",
+                    stacklevel=2,
+                )
 
     # Maps unified op names to the scalar variant for block ops.
     # Only binary arithmetic ops have scalar auto-dispatch.
