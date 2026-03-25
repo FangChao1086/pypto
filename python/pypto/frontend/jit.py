@@ -622,7 +622,7 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3", enable_print_deb
     )
     flags.extend(runtime_includes)
     result = subprocess.run(
-        ["bisheng", *flags, final_kernel, "-L", LD_LIB_PATH, "-lruntime", "-o", lib_path],
+        ["bisheng", *flags, final_kernel, "-L", LD_LIB_PATH, "-lruntime", "-lprofapi", "-o", lib_path],
         check=False, timeout=timeout, capture_output=True
     )
     if result.returncode != 0:
