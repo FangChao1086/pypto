@@ -2629,6 +2629,16 @@ class ASTParser:
 
         args = [self.parse_expression(arg) for arg in call.args]
         kwargs = self._parse_op_kwargs(call)
+
+        # Reorder args: move 'out' or 'dst' from kwargs to args[0] if present.
+        # This supports both calling conventions:
+        #   plm.load(tile, tensor, offsets)          # positional args
+        #   plm.load(tensor, offsets, shapes, out=tile)  # keyword arg
+        if 'out' in kwargs:
+            args = [kwargs.pop('out')] + args
+        elif 'dst' in kwargs:
+            args = [kwargs.pop('dst')] + args
+
         # Dispatch to ir_op.manual.<op_name> when a handler exists.
         if hasattr(ir_op.manual, op_name):
             op_func = getattr(ir_op.manual, op_name)
