@@ -31,7 +31,8 @@ M = pl.DynVar('M')
 K = pl.DynVar('K')
 N = pl.DynVar('N')
 
-@fe.kernel
+@fe.kernel(auto_sync=True)
+# @fe.kernel
 def dynamic_matmul_db_kernel(
     a: pl.Tensor[[M, K], pl.FP16],
     b: pl.Tensor[[K, N], pl.FP16],
@@ -107,7 +108,7 @@ def dynamic_matmul_db_kernel(
         # Event-id tuples: index 0 = ping, index 1 = pong.
         # Different (set_pipe, wait_pipe) combinations have independent event_id
         # namespaces (0–7 each), so the same values 0/1 are reused across combos.
-        event_ids = (0, 1)
+        # event_ids = (0, 1)
 
         for i in pl.range(0, M_dim, 128):
             for j in pl.range(0, N_dim, 128):
@@ -121,15 +122,15 @@ def dynamic_matmul_db_kernel(
                     plm.load(tile_b_load_buf[buf_idx], b, [k, j])
 
                     # (MTE2, MTE1) — load done, move can start
-                    pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=event_ids[buf_idx])
-                    pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=event_ids[buf_idx])
+                    # pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=event_ids[buf_idx])
+                    # pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=event_ids[buf_idx])
 
                     plm.move(tile_a_buf[buf_idx], tile_a_load_buf[buf_idx])
                     plm.move(tile_b_buf[buf_idx], tile_b_load_buf[buf_idx])
 
                     # (MTE1, M) — move done, matmul can start
-                    pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=event_ids[buf_idx])
-                    pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=event_ids[buf_idx])
+                    # pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=event_ids[buf_idx])
+                    # pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=event_ids[buf_idx])
 
                     if k == 0:
                         plm.matmul(tile_c, tile_a_buf[buf_idx], tile_b_buf[buf_idx])
@@ -137,16 +138,16 @@ def dynamic_matmul_db_kernel(
                         plm.matmul_acc(tile_c, tile_c, tile_a_buf[buf_idx], tile_b_buf[buf_idx])
 
                     # (M, MTE2) — matmul done, next iteration's load can start
-                    pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE2, event_id=event_ids[buf_idx])
-                    pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE2, event_id=event_ids[buf_idx])
+                    # pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE2, event_id=event_ids[buf_idx])
+                    # pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE2, event_id=event_ids[buf_idx])
 
                 # Store result after all k-tiles are accumulated
-                pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
-                pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
+                # pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
+                # pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
                 plm.l0c_store(tile_c, [i, j], [128, 128], c)
 
                 # Barrier to ensure l0c_store is complete before next (i, j) iteration
-                pl.system.bar_all()
+                # pl.system.bar_all()
 
     return c
 
@@ -156,7 +157,7 @@ def test_dynamic_matmul_db():
     compiled_lib = fe.compile(dynamic_matmul_db_kernel, arch="a3")
     print("compiled lib path:", compiled_lib.lib_path)
 
-    device = "npu:1"
+    device = "npu:7"
     torch.npu.set_device(device)
 
     shapes = [

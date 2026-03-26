@@ -526,7 +526,9 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3", enable_print_deb
     """Compile a PTO program to a shared library.
 
     Args:
-        prog: The PTO program to compile.
+        prog: The PTO program or KernelDef to compile.
+            If a :class:`KernelDef`, AST parsing is triggered with *arch*
+            to produce an ``ir.Program`` before code generation.
         clean_up: Whether to remove intermediate files after compilation.
         timeout: Compilation timeout in seconds.
         arch: Target architecture. Options: "a2", "a3", "a5".
@@ -535,6 +537,11 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3", enable_print_deb
             - True: force enable device-side debug printing flags
             - False: force disable device-side debug printing flags
     """
+    # Deferred compilation: parse KernelDef → ir.Program with arch info
+    from pypto.frontend.kernel import KernelDef
+    if isinstance(prog, KernelDef):
+        prog = prog.parse(npu_arch=arch)
+
     arch = _normalize_arch(arch)
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.PTO)

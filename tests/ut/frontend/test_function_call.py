@@ -37,8 +37,13 @@ from pypto.pypto_core.codegen import PTOCodegen
 from pypto.language.parser.diagnostics import UnsupportedFeatureError
 
 
-def _compile_to_mlir(prog) -> str:
-    """Compile an ir.Program to PTO MLIR without running external tools."""
+def _compile_to_mlir(kernel_def_or_prog) -> str:
+    """Compile a KernelDef or ir.Program to PTO MLIR without running external tools."""
+    from pypto.frontend.kernel import KernelDef
+    if isinstance(kernel_def_or_prog, KernelDef):
+        prog = kernel_def_or_prog.parse()
+    else:
+        prog = kernel_def_or_prog
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.PTO)
     codegen = PTOCodegen()
@@ -285,17 +290,18 @@ def nested_outer(base, stride):
 
 def test_auto_inline_nested_call_raises():
     """Auto-inlined function with a nested bare-name call raises UnsupportedFeatureError."""
-    with pytest.raises(UnsupportedFeatureError, match="cannot call other functions"):
+    @fe.kernel
+    def kernel_with_nested(
+        a: pl.Tensor[[64, 128], pl.FP16],
+    ) -> pl.Tensor[[64, 128], pl.FP16]:
+        tile_type_a = plm.TileType(shape=[64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec)
+        tile_a = plm.make_tile(tile_type_a, addr=0x0000, size=16384)
+        plm.load(tile_a, a, [0, 0])
+        result: pl.Scalar[pl.INDEX] = nested_outer(0, 64)
+        return a
 
-        @fe.kernel
-        def kernel_with_nested(
-            a: pl.Tensor[[64, 128], pl.FP16],
-        ) -> pl.Tensor[[64, 128], pl.FP16]:
-            tile_type_a = plm.TileType(shape=[64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec)
-            tile_a = plm.make_tile(tile_type_a, addr=0x0000, size=16384)
-            plm.load(tile_a, a, [0, 0])
-            result: pl.Scalar[pl.INDEX] = nested_outer(0, 64)
-            return a
+    with pytest.raises(UnsupportedFeatureError, match="cannot call other functions"):
+        _compile_to_mlir(kernel_with_nested)
 
 
 # ===========================================================================

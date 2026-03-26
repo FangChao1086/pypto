@@ -11,6 +11,10 @@
 
 Assigns hardware event register indices to sync operations so that
 independent dependency chains do not share the same event ID.
+
+Hardware model: each ``(set_pipe, wait_pipe)`` pair has its own independent
+namespace of 8 event IDs (0..7).  The allocator tracks usage per pipe pair
+so that different pipe pairs can freely reuse the same ID values.
 """
 
 from __future__ import annotations
@@ -21,62 +25,76 @@ from pypto.pypto_core.ir import PipeType
 
 
 class EventIdAllocator:
-    """Assigns event IDs to sync operations.
+    """Assigns event IDs to sync operations, per hardware pipe pair.
 
-    Hardware constraint: 8 event IDs (0..7).
+    Hardware constraint: 8 event IDs (0..7) per ``(set_pipe, wait_pipe)`` pair.
 
-    Strategy:
-    - Forward syncs: each unique (set_pipe, wait_pipe) pair gets a stable ID.
-    - Backward syncs: each unique (set_pipe, wait_pipe, loop_depth) triple
-      gets a stable ID from a separate pool.
-    - Both pools wrap around modulo MAX_EVENTS if exhausted.
+    Strategy: each unique ``(set_pipe, wait_pipe)`` pair has its own counter
+    starting from 0.  Forward and backward syncs on the same pipe pair share
+    the same counter to avoid collisions within the hardware namespace.
+    Different pipe pairs have independent counters.
     """
 
     MAX_EVENTS: int = 8
 
     def __init__(self) -> None:
-        self._forward_map: dict[tuple[PipeType, PipeType], int] = {}
-        self._backward_map: dict[tuple[PipeType, PipeType, int], int] = {}
-        self._forward_next: int = 0
-        self._backward_next: int = 0
+        # Per-pipe-pair counter: (set_pipe, wait_pipe) → next available ID
+        self._pipe_pair_next: dict[tuple[PipeType, PipeType], int] = {}
+        # Cache: (set_pipe, wait_pipe, context_key) → allocated base ID
+        self._alloc_cache: dict[tuple, int] = {}
 
-    def forward_event_id(self, set_pipe: PipeType, wait_pipe: PipeType) -> int:
-        """Get or allocate a forward sync event ID for a pipe pair."""
-        key = (set_pipe, wait_pipe)
-        if key not in self._forward_map:
-            eid = self._forward_next % self.MAX_EVENTS
-            if self._forward_next >= self.MAX_EVENTS:
-                warnings.warn(
-                    f"Auto-sync: forward event ID pool exhausted "
-                    f"({self._forward_next + 1} pipe pairs > {self.MAX_EVENTS} events). "
-                    f"Wrapping around — may cause false synchronization.",
-                    stacklevel=2,
-                )
-            self._forward_map[key] = eid
-            self._forward_next += 1
-        return self._forward_map[key]
+    def forward_event_id(
+        self, set_pipe: PipeType, wait_pipe: PipeType, n_slots: int = 1,
+    ) -> int:
+        """Get or allocate forward sync event ID(s) for a pipe pair.
+
+        Args:
+            set_pipe: The pipeline that produces data.
+            wait_pipe: The pipeline that consumes data.
+            n_slots: Number of consecutive event IDs to allocate.
+
+        Returns:
+            Base event ID.  For slot *i*, use ``(base + i) % MAX_EVENTS``.
+        """
+        cache_key = ("fwd", set_pipe, wait_pipe)
+        if cache_key in self._alloc_cache:
+            return self._alloc_cache[cache_key]
+        base = self._allocate(set_pipe, wait_pipe, n_slots)
+        self._alloc_cache[cache_key] = base
+        return base
 
     def backward_event_id(
         self, set_pipe: PipeType, wait_pipe: PipeType, loop_depth: int,
+        n_slots: int = 1,
     ) -> int:
-        """Get or allocate a backward sync event ID for a pipe pair + depth."""
-        key = (set_pipe, wait_pipe, loop_depth)
-        if key not in self._backward_map:
-            eid = self._backward_next % self.MAX_EVENTS
-            if self._backward_next >= self.MAX_EVENTS:
-                warnings.warn(
-                    f"Auto-sync: backward event ID pool exhausted "
-                    f"({self._backward_next + 1} triples > {self.MAX_EVENTS} events). "
-                    f"Wrapping around — may cause false synchronization.",
-                    stacklevel=2,
-                )
-            self._backward_map[key] = eid
-            self._backward_next += 1
-        return self._backward_map[key]
+        """Get or allocate backward sync event ID(s) for a pipe pair + depth.
+
+        Returns the base event ID.  For slot *i*, use
+        ``(base + i) % MAX_EVENTS``.
+        """
+        cache_key = ("bwd", set_pipe, wait_pipe, loop_depth)
+        if cache_key in self._alloc_cache:
+            return self._alloc_cache[cache_key]
+        base = self._allocate(set_pipe, wait_pipe, n_slots)
+        self._alloc_cache[cache_key] = base
+        return base
+
+    def _allocate(self, set_pipe: PipeType, wait_pipe: PipeType, n_slots: int) -> int:
+        """Allocate *n_slots* consecutive event IDs on a pipe pair."""
+        pipe_key = (set_pipe, wait_pipe)
+        next_id = self._pipe_pair_next.get(pipe_key, 0)
+        base = next_id % self.MAX_EVENTS
+        if next_id + n_slots > self.MAX_EVENTS:
+            warnings.warn(
+                f"Auto-sync: event ID pool for ({set_pipe.name}, {wait_pipe.name}) exhausted "
+                f"({next_id + n_slots} IDs > {self.MAX_EVENTS} events). "
+                f"Wrapping around — may cause false synchronization.",
+                stacklevel=3,
+            )
+        self._pipe_pair_next[pipe_key] = next_id + n_slots
+        return base
 
     def reset(self) -> None:
         """Reset all allocations. Called per-kernel."""
-        self._forward_map.clear()
-        self._backward_map.clear()
-        self._forward_next = 0
-        self._backward_next = 0
+        self._pipe_pair_next.clear()
+        self._alloc_cache.clear()

@@ -27,6 +27,10 @@ class BufferState:
 
     last_write_pipe: PipeType | None = None
     last_read_pipes: set[PipeType] = field(default_factory=set)
+    # Pipes to which this tile's last_write_pipe has already been synced.
+    # Used to suppress redundant sync: hardware set_flag is per-pipe,
+    # so one sync(MTE2→MTE1) covers ALL tiles written by MTE2.
+    synced_to: set[PipeType] = field(default_factory=set)
 
 
 @dataclass
@@ -54,8 +58,11 @@ class BackwardDep:
         first_pipe: First pipeline to access the tile in the loop body.
         last_pipe: Last pipeline to access the tile in the loop body.
         tile_name: Variable name of the tile (for diagnostics).
-        event_id: Hardware event register index for this backward dep.
+        event_id: Hardware event register index (base ID for multi-slot).
         loop_depth: Nesting level of the loop containing this dep.
+        n_slots: Number of buffer slots (1=normal, 2=double-buffer).
+            When >1, event IDs ``event_id .. event_id + n_slots - 1`` are used,
+            and backward sync is emitted per-slot via if-else on the buffer index.
     """
 
     first_pipe: PipeType
@@ -63,6 +70,7 @@ class BackwardDep:
     tile_name: str
     event_id: int = 0
     loop_depth: int = 0
+    n_slots: int = 1
 
 
 @dataclass

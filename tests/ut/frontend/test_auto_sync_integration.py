@@ -38,14 +38,14 @@ class TestAutoSyncForward:
             plm.add(tile_b, tile_a, tile_a)       # V: reads tile_a → RAW
             return x
 
-        ir_str = _ir_to_str(k)
+        ir_str = _ir_to_str(k.parse())
         assert "system.sync_src" in ir_str, f"Expected sync_src in IR:\n{ir_str}"
         assert "system.sync_dst" in ir_str, f"Expected sync_dst in IR:\n{ir_str}"
 
     def test_same_pipe_no_sync_a5(self):
         """Two V ops on same tile, a5 arch → no sync (hardware guarantees ordering)."""
 
-        @fe.kernel(auto_sync=True, npu_arch="dav-3510")
+        @fe.kernel(auto_sync=True)
         def k(
             x: pl.Tensor[[64], pl.FP16],
         ) -> pl.Tensor[[64], pl.FP16]:
@@ -57,7 +57,7 @@ class TestAutoSyncForward:
             plm.neg(tile_c, tile_b)               # V - same pipe, a5 → no sync
             return x
 
-        ir_str = _ir_to_str(k)
+        ir_str = _ir_to_str(k.parse(npu_arch="dav-3510"))
         assert "system.sync_src" not in ir_str, f"No sync expected on a5:\n{ir_str}"
 
     def test_same_pipe_no_sync_default(self):
@@ -75,13 +75,13 @@ class TestAutoSyncForward:
             plm.neg(tile_c, tile_b)               # V - same pipe, no arch → no sync
             return x
 
-        ir_str = _ir_to_str(k)
+        ir_str = _ir_to_str(k.parse())
         assert "system.sync_src" not in ir_str, f"No sync expected by default:\n{ir_str}"
 
     def test_same_pipe_sync_required_a3(self):
         """Two V ops on same tile, a3 arch → sync required (V→V needs software sync)."""
 
-        @fe.kernel(auto_sync=True, npu_arch="a3")
+        @fe.kernel(auto_sync=True)
         def k(
             x: pl.Tensor[[64], pl.FP16],
         ) -> pl.Tensor[[64], pl.FP16]:
@@ -93,14 +93,14 @@ class TestAutoSyncForward:
             plm.neg(tile_c, tile_b)               # V: reads tile_b → needs V→V sync
             return x
 
-        ir_str = _ir_to_str(k)
+        ir_str = _ir_to_str(k.parse(npu_arch="a3"))
         assert "system.sync_src" in ir_str, f"Expected V→V sync on a3:\n{ir_str}"
         assert "system.sync_dst" in ir_str, f"Expected V→V sync on a3:\n{ir_str}"
 
     def test_same_pipe_sync_required_dav2201(self):
         """dav-2201 arch string also triggers same-pipe sync."""
 
-        @fe.kernel(auto_sync=True, npu_arch="dav-2201")
+        @fe.kernel(auto_sync=True)
         def k(
             x: pl.Tensor[[64], pl.FP16],
         ) -> pl.Tensor[[64], pl.FP16]:
@@ -112,7 +112,7 @@ class TestAutoSyncForward:
             plm.neg(tile_c, tile_b)               # V → needs sync on dav-2201
             return x
 
-        ir_str = _ir_to_str(k)
+        ir_str = _ir_to_str(k.parse(npu_arch="dav-2201"))
         assert "system.sync_src" in ir_str, f"Expected V→V sync on dav-2201:\n{ir_str}"
 
     def test_auto_sync_disabled_no_sync(self):
@@ -129,7 +129,7 @@ class TestAutoSyncForward:
             plm.add(tile_b, tile_a, tile_a)       # V
             return x
 
-        ir_str = _ir_to_str(k)
+        ir_str = _ir_to_str(k.parse())
         assert "system.sync_src" not in ir_str, f"No sync expected:\n{ir_str}"
 
     def test_default_no_auto_sync(self):
@@ -146,7 +146,7 @@ class TestAutoSyncForward:
             plm.add(tile_b, tile_a, tile_a)
             return x
 
-        ir_str = _ir_to_str(k)
+        ir_str = _ir_to_str(k.parse())
         assert "system.sync_src" not in ir_str
 
     def test_different_tiles_no_sync(self):
@@ -164,9 +164,32 @@ class TestAutoSyncForward:
             plm.load(tile_b, y, [0])             # MTE2: writes tile_b
             return x
 
-        ir_str = _ir_to_str(k)
+        ir_str = _ir_to_str(k.parse())
         # Both loads write different tiles on same pipe → no sync
         assert "system.sync_src" not in ir_str
+
+    def test_same_kernel_different_arch(self):
+        """Same KernelDef can be parsed for different architectures."""
+
+        @fe.kernel(auto_sync=True)
+        def k(
+            x: pl.Tensor[[64], pl.FP16],
+        ) -> pl.Tensor[[64], pl.FP16]:
+            tt = plm.TileType(shape=[64], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec)
+            tile_a = plm.make_tile(tt, addr=0, size=128)
+            tile_b = plm.make_tile(tt, addr=128, size=128)
+            tile_c = plm.make_tile(tt, addr=256, size=128)
+            plm.add(tile_b, tile_a, tile_a)
+            plm.neg(tile_c, tile_b)
+            return x
+
+        # a3: V→V needs sync
+        ir_a3 = _ir_to_str(k.parse(npu_arch="a3"))
+        assert "system.sync_src" in ir_a3
+
+        # a5: V→V does not need sync
+        ir_a5 = _ir_to_str(k.parse(npu_arch="a5"))
+        assert "system.sync_src" not in ir_a5
 
 
 class TestAutoSyncBackward:
@@ -187,7 +210,7 @@ class TestAutoSyncBackward:
                 plm.add(tile_b, tile_a, tile_a)   # V → cross-pipe dep
             return x
 
-        ir_str = _ir_to_str(k)
+        ir_str = _ir_to_str(k.parse())
         # Backward sync should produce sync ops both outside and inside the loop
         sync_count = ir_str.count("system.sync_src")
         # Priming (1) + body end set per dep (1) = 2 sync_src
@@ -196,9 +219,9 @@ class TestAutoSyncBackward:
 
 
 class TestAutoSyncProgram:
-    """Verify auto_sync produces valid Programs."""
+    """Verify auto_sync produces valid KernelDefs and Programs."""
 
-    def test_result_is_program(self):
+    def test_result_is_kernel_def(self):
         @fe.kernel(auto_sync=True)
         def k(
             x: pl.Tensor[[64], pl.FP16],
@@ -208,8 +231,10 @@ class TestAutoSyncProgram:
             plm.load(tile_a, x, [0])
             return x
 
-        assert isinstance(k, ir.Program)
-        assert k.get_function("k") is not None
+        assert isinstance(k, fe.KernelDef)
+        prog = k.parse()
+        assert isinstance(prog, ir.Program)
+        assert prog.get_function("k") is not None
 
 
 if __name__ == "__main__":

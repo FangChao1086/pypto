@@ -227,6 +227,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   extra_tile_buf_types_.clear();
   tuple_var_to_make_tuple_.clear();
   indirect_select_depth_ = 0;
+  indirect_addr_vars_.clear();
   constants_section_.str("");
   constants_section_.clear();
   body_section_.str("");
@@ -1154,15 +1155,26 @@ void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
 
     if (indirect_select_depth_ > 0) {
       if (auto tile_type = As<TileType>(expr->GetType())) {
-        // Yield i64 addr instead of tile_buf for TileType in indirect-select scf.if
-        std::string addr_operand;
-        if (tile_type->memref_.has_value() && tile_type->memref_.value()->addr_) {
-          if (auto ca = As<ir::ConstInt>(tile_type->memref_.value()->addr_)) {
-            addr_operand = GetOrEmitI64Constant(ca->value_);
-          }
+        // Yield i64 addr instead of tile_buf for TileType in indirect-select scf.if.
+        // If expr is a Var whose name is in indirect_addr_vars_, it was already mapped
+        // directly to an addr_ssa by the inner IfStmt reconstruction (to avoid emitting
+        // a dead pto.alloc_tile). In that case, val already holds the correct i64 addr —
+        // don't override with the static memref addr.
+        bool is_indirect_addr_var = false;
+        if (auto var = As<ir::Var>(expr)) {
+          is_indirect_addr_var = (indirect_addr_vars_.count(var->name_) > 0);
         }
-        if (addr_operand.empty()) addr_operand = GetOrEmitI64Constant(0);
-        val = addr_operand;
+        if (!is_indirect_addr_var) {
+          std::string addr_operand;
+          if (tile_type->memref_.has_value() && tile_type->memref_.value()->addr_) {
+            if (auto ca = As<ir::ConstInt>(tile_type->memref_.value()->addr_)) {
+              addr_operand = GetOrEmitI64Constant(ca->value_);
+            }
+          }
+          if (addr_operand.empty()) addr_operand = GetOrEmitI64Constant(0);
+          val = addr_operand;
+        }
+        // else: val already holds addr_ssa (e.g., "%57") — keep as-is
       } else if (auto tensor_type = As<TensorType>(expr->GetType())) {
         // TensorType: yield index offset instead of ptr for indirect-select scf.if.
         // The scf.if yields an index (addptr offset), then IfStmt reconstruction emits
@@ -1359,13 +1371,22 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       if (!needs_indirect_yield[rv_idx]) continue;
       const auto& return_var = op->return_vars_[rv_idx];
       if (auto tile_type = As<TileType>(return_var->GetType())) {
-        // TileType: reconstruct tile_buf from the i64 addr returned by scf.if
-        std::string tile_buf_type = GetTileBufTypeStringFromTileType(tile_type);
         std::string addr_ssa = return_var_names[rv_idx];
-        std::string tile_name = NewTemp();
-        Emit(tile_name + " = pto.alloc_tile addr = " + addr_ssa + " : " + tile_buf_type);
-        var_to_mlir_[return_var->name_] = tile_name;
-        extra_tile_buf_types_[tile_name] = tile_buf_type;
+        if (indirect_select_depth_ > 0) {
+          // Inside an outer indirect-select chain: skip pto.alloc_tile.
+          // Map var directly to addr_ssa so the outer yield can propagate it as i64
+          // without overriding with the static memref addr.
+          var_to_mlir_[return_var->name_] = addr_ssa;
+          indirect_addr_vars_.insert(return_var->name_);
+        } else {
+          // Outermost level: reconstruct tile_buf from the dynamically selected addr.
+          std::string tile_buf_type = GetTileBufTypeStringFromTileType(tile_type);
+          std::string tile_name = NewTemp();
+          Emit(tile_name + " = pto.alloc_tile addr = " + addr_ssa + " : " + tile_buf_type);
+          var_to_mlir_[return_var->name_] = tile_name;
+          extra_tile_buf_types_[tile_name] = tile_buf_type;
+          indirect_addr_vars_.erase(return_var->name_);
+        }
       } else if (auto tensor_type = As<TensorType>(return_var->GetType())) {
         // TensorType: reconstruct tensor_view from (base ptr, selected index offset) returned by scf.if.
         // 1. Read base_ptr from the PtrType annotation stored in the tensor's TensorView::ptr.

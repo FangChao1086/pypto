@@ -32,7 +32,7 @@ FA_QK_READY = 7
 FA_P_READY = 8
 FA_PV_READY = 9
 
-@fe.kernel
+@fe.kernel(auto_sync=True)
 def flash_attention_kernel(
     q: pl.Tensor[[S0, HEAD_SIZE], pl.FP16],
     k_t: pl.Tensor[[HEAD_SIZE, S1], pl.FP16],
@@ -246,25 +246,25 @@ def flash_attention_kernel(
                     plm.load_tile(q_mat, q, [s0_tile, k_tile])
                     plm.load_tile(k_mat, k_t, [k_tile, s1_tile])
 
-                    pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
-                    pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
+                    # pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
+                    # pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
 
                     plm.move(q_left, q_mat)
                     plm.move(k_right, k_mat)
 
-                    pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=1)
-                    pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=1)
+                    # pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=1)
+                    # pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=1)
 
                     if k_tile == 0:
                         plm.matmul(qk_acc, q_left, k_right)
                     else:
                         plm.matmul_acc(qk_acc, qk_acc, q_left, k_right)
 
-                    pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE2, event_id=2)
-                    pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE2, event_id=2)
+                    # pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE2, event_id=2)
+                    # pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE2, event_id=2)
 
-                pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
-                pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
+                # pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
+                # pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
                 plm.store_tile(qk_buf, qk_acc, [s0_tile, s1_tile])
                 pl.system.set_cross_core(pipe=pl.PipeType.FIX, event_id=FA_QK_READY)
 
@@ -289,10 +289,10 @@ def flash_attention_kernel(
             pl.system.wait_cross_core(pipe=pl.PipeType.FIX, event_id=FA_QK_READY)
             s0_vec_tile = s0_tile * 2 + subblock_idx
             for s1_tile in pl.range(num_tiles_s1):
-                pl.system.bar_all()
+                # pl.system.bar_all()
                 plm.load_tile(qk_vec, qk_buf, [s0_vec_tile, s1_tile])
-                pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
-                pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
+                # pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
+                # pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
 
                 if s1_tile == 0:
                     plm.row_max(mi_local, qk_vec, tmp_vec)
@@ -319,15 +319,15 @@ def flash_attention_kernel(
                     plm.add(li_running, li_running, tmp_vec)
 
                 plm.cast(p_fp16, qk_vec, target_type=pl.FP16, mode="round")
-                pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
-                pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
+                # pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
+                # pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
                 plm.store_tile(p_buf, p_fp16, [s0_vec_tile, s1_tile])
 
             for s1_tile in pl.range(num_tiles_s1):
-                pl.system.bar_all()
+                # pl.system.bar_all()
                 plm.load_tile(qk_vec, qk_buf, [s0_vec_tile, s1_tile])
-                pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
-                pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
+                # pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
+                # pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
 
                 plm.sub(tmp_vec, qk_vec, mi_running)
                 plm.muls(tmp_vec, tmp_vec, SOFTMAX_SCALE)
@@ -335,13 +335,13 @@ def flash_attention_kernel(
                 plm.div(qk_vec, qk_vec, li_running)
                 plm.cast(p_fp16, qk_vec, target_type=pl.FP16, mode="round")
 
-                pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
-                pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
+                # pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
+                # pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
                 plm.store_tile(p_norm_buf, p_fp16, [s0_vec_tile, s1_tile])
 
-            pl.system.bar_all()
-            pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
-            pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
+            # pl.system.bar_all()
+            # pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
+            # pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
             plm.row_max(mi_local, mi_running, tmp_vec)
             plm.store_tile(mi_out, mi_local, [s0_vec_tile, 0])
             plm.row_max(mi_local, li_running, tmp_vec)
@@ -367,25 +367,25 @@ def flash_attention_kernel(
                 plm.load_tile(p_mat, p_norm_buf, [s0_tile, s1_tile])
                 plm.load_tile(v_mat, v, [s1_tile, 0])
 
-                pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
-                pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
+                # pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
+                # pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
 
                 plm.move(p_left, p_mat)
                 plm.move(v_right, v_mat)
 
-                pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=1)
-                pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=1)
+                # pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=1)
+                # pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=1)
 
                 if s1_tile == 0:
                     plm.matmul(pv_acc, p_left, v_right)
                 else:
                     plm.matmul_acc(pv_acc, pv_acc, p_left, v_right)
 
-                pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE2, event_id=2)
-                pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE2, event_id=2)
+                # pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE2, event_id=2)
+                # pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE2, event_id=2)
 
-            pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
-            pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
+            # pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
+            # pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
             plm.store_tile(pv_buf, pv_acc, [s0_tile, 0])
             pl.system.set_cross_core(pipe=pl.PipeType.FIX, event_id=FA_PV_READY)
 
@@ -404,13 +404,13 @@ def flash_attention_kernel(
         for s0_tile in pl.range(block_idx, num_tiles_s0, block_num):
             pl.system.wait_cross_core(pipe=pl.PipeType.FIX, event_id=FA_PV_READY)
             s0_vec_tile = s0_tile * 2 + subblock_idx
-            pl.system.bar_all()
+            # pl.system.bar_all()
             plm.load_tile(qk_vec, pv_buf, [s0_vec_tile, 0])
-            pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
-            pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
+            # pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
+            # pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
             plm.cast(p_fp16, qk_vec, target_type=pl.FP16, mode="round")
-            pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
-            pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
+            # pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
+            # pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
             plm.store_tile(o, p_fp16, [s0_vec_tile, 0])
 
     return o
@@ -473,7 +473,7 @@ def test_flash_attention_multicore():
         o,
     )
     log("stage 3: synchronize")
-    torch.npu.synchronize()
+    torch.npu.synchronize() 
 
     log("stage 4: copy outputs to cpu")
     qk_cpu = qk_buf.cpu()

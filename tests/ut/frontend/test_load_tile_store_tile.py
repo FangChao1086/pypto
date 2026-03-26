@@ -22,8 +22,13 @@ from pypto.backend import BackendType
 from pypto.pypto_core.codegen import PTOCodegen
 
 
-def _compile_to_mlir(prog) -> str:
-    """Compile an ir.Program to PTO MLIR without running external tools."""
+def _compile_to_mlir(kernel_def_or_prog) -> str:
+    """Compile a KernelDef or ir.Program to PTO MLIR without running external tools."""
+    from pypto.frontend.kernel import KernelDef
+    if isinstance(kernel_def_or_prog, KernelDef):
+        prog = kernel_def_or_prog.parse()
+    else:
+        prog = kernel_def_or_prog
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.PTO)
     codegen = PTOCodegen()

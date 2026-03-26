@@ -79,6 +79,65 @@ def _arch_needs_same_pipe_sync(npu_arch: str | None) -> bool:
     return "dav-2201" in arch or arch in ("a2", "a3")
 
 
+def _loop_body_has_bar_all(body: list[ast.stmt]) -> bool:
+    """Return True if the loop body contains a ``pl.system.bar_all()`` call.
+
+    When a barrier is present at each iteration boundary, all pipelines are
+    flushed — there are no cross-iteration tile dependencies and backward
+    sync insertion can be skipped.
+    """
+    for stmt in body:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            func = stmt.value.func
+            if (
+                isinstance(func, ast.Attribute) and func.attr == "bar_all"
+                and isinstance(func.value, ast.Attribute) and func.value.attr == "system"
+            ):
+                return True
+    return False
+
+
+def _loop_body_backward_sync_redundant(body: list[ast.stmt]) -> bool:
+    """Return True if the outer loop's backward sync is redundant.
+
+    This happens when:
+    - The loop body contains a ``bar_all()`` (explicit barrier), OR
+    - Every tile operation in the loop body is inside a nested ``for`` loop
+      (the nested loop will have its own backward sync that covers cross-
+      iteration deps; the outer loop doesn't need additional sync).
+    """
+    if _loop_body_has_bar_all(body):
+        return True
+    # Check if all tile ops are inside nested for-loops.
+    # If the body has only for-loops, with/section blocks, and non-tile
+    # assignments, the outer loop doesn't directly use tiles across iterations.
+    for stmt in body:
+        if isinstance(stmt, ast.For):
+            continue  # nested loop handles its own sync
+        if isinstance(stmt, ast.With):
+            # Check inside with-body (e.g., section_cube)
+            if not _loop_body_backward_sync_redundant(stmt.body):
+                return False
+            continue
+        if isinstance(stmt, ast.Assign):
+            # Tile ops in assignments: check if it's a plm.xxx() call
+            if isinstance(stmt.value, ast.Call):
+                func = stmt.value.func
+                if (isinstance(func, ast.Attribute)
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "plm"):
+                    return False  # tile op directly in outer loop body
+            continue
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            func = stmt.value.func
+            if (isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "plm"):
+                return False  # tile op directly in outer loop body
+            continue
+    return True
+
+
 class _StructVar:
     """Compile-time grouping of IR expressions, accessed via attribute syntax.
 
@@ -162,6 +221,12 @@ class ASTParser:
         # Populated when a simple assignment like `event_ids = (0, 1)` is parsed.
         # Used by the sync-op statement expander to generate per-branch IfStmt chains.
         self._const_tuple_registry: dict[str, list[int]] = {}
+
+        # Registry mapping variable names to their tile-tuple contents.
+        # Populated when a simple assignment like `tile_buf = (ping, pong)` is parsed
+        # and all elements resolve to TileType variables in the current scope.
+        # Used by auto-sync to resolve tile_buf[buf_idx] subscript accesses.
+        self._tile_tuple_registry: dict[str, list[str]] = {}
 
         # Auto-sync: track per-tile pipeline state for automatic sync insertion
         if auto_sync:
@@ -511,6 +576,18 @@ class ASTParser:
                     for elt in stmt.value.elts
                 ):
                     self._const_tuple_registry[var_name] = [elt.value for elt in stmt.value.elts]  # type: ignore[union-attr]
+
+                # Register tile-variable tuples for DB auto-sync subscript resolution
+                if isinstance(stmt.value, ast.Tuple) and len(stmt.value.elts) >= 2:
+                    tile_names: list[str] = []
+                    for elt in stmt.value.elts:
+                        if isinstance(elt, ast.Name):
+                            elt_var = self.scope_manager.lookup_var(elt.id)
+                            if elt_var is not None and isinstance(getattr(elt_var, "type", None), ir.TileType):
+                                tile_names.append(elt.id)
+                    if len(tile_names) == len(stmt.value.elts):
+                        self._tile_tuple_registry[var_name] = tile_names
+
                 return
 
             # Handle struct field assignment: ctx.field = value
@@ -756,21 +833,40 @@ class ASTParser:
         backward_deps: list = []
         if self.sync_tracker is not None:
             from pypto.frontend.sync_tracker import (
+                BackwardDep,
                 emit_backward_sync_dst,
                 emit_backward_sync_src,
                 prescan_loop_backward_deps,
             )
+
+            # Flush any outer loop's pending backward waits before this loop
+            # starts.  Must happen BEFORE the for_loop builder context so the
+            # waits are emitted at the outer loop level, not inside this loop.
+            self._flush_all_pending_backward_waits(span)
 
             backward_deps = prescan_loop_backward_deps(
                 stmt.body,
                 self.scope_manager.lookup_var,
                 self.sync_tracker._event_allocator,
                 loop_depth=self.sync_tracker.get_loop_depth(),
+                tile_tuple_registry=self._tile_tuple_registry,
             )
+            # If the loop body's tile ops are all inside nested loops (which have
+            # their own backward sync), or if bar_all is present, skip redundant
+            # outer-loop backward sync.
+            if _loop_body_backward_sync_redundant(stmt.body):
+                backward_deps = []
             # 1. Priming: emit sync_src before the loop so the first
             #    iteration's wait_flag has a matching set_flag.
+            #    For DB deps (n_slots>1), emit one set_flag per slot.
             for dep in backward_deps:
-                emit_backward_sync_src(self.builder, dep, span)
+                if dep.n_slots > 1:
+                    for slot in range(dep.n_slots):
+                        eid = (dep.event_id + slot) % 8
+                        slot_dep = BackwardDep(dep.first_pipe, dep.last_pipe, dep.tile_name, eid, dep.loop_depth)
+                        emit_backward_sync_src(self.builder, slot_dep, span)
+                else:
+                    emit_backward_sync_src(self.builder, dep, span)
             # Save pre-loop buffer states
             self.sync_tracker.enter_loop()
 
@@ -798,10 +894,21 @@ class ASTParser:
             prev_yield_types = getattr(self, "_current_yield_types", None)
             self._current_yield_types = {}
 
-            # Auto-sync: backward wait at loop body start
+            # Auto-sync: register deferred backward waits.
+            # Instead of emitting all backward waits at body start, defer
+            # each wait until the first op on its first_pipe runs.  This
+            # allows load (MTE2) to overlap with the previous matmul (M)
+            # because the M→MTE1 wait is deferred to right before the move.
             if self.sync_tracker is not None:
+                db_slot_expr = None
+                if backward_deps and any(dep.n_slots > 1 for dep in backward_deps):
+                    db_slot_expr = self._build_db_slot_expr(loop_var, range_args["step"],
+                                                            backward_deps[0].n_slots, span)
+                self._pending_backward_waits = {}
+                self._pending_backward_wait_slot_expr = db_slot_expr
                 for dep in backward_deps:
-                    emit_backward_sync_dst(self.builder, dep, span)
+                    pipe = dep.first_pipe
+                    self._pending_backward_waits.setdefault(pipe, []).append(dep)
 
             for body_stmt in stmt.body:
                 self.parse_statement(body_stmt)
@@ -809,7 +916,11 @@ class ASTParser:
             # Auto-sync: backward set at loop body end
             if self.sync_tracker is not None:
                 for dep in backward_deps:
-                    emit_backward_sync_src(self.builder, dep, span)
+                    if dep.n_slots > 1:
+                        slot_expr = self._build_db_slot_expr(loop_var, range_args["step"], dep.n_slots, span)
+                        self._emit_backward_db_sync_chain(dep, slot_expr, emit_backward_sync_src, span)
+                    else:
+                        emit_backward_sync_src(self.builder, dep, span)
 
             loop_output_vars = self._current_yield_vars[:]
             self._current_yield_vars = prev_yield_tracker
@@ -825,8 +936,18 @@ class ASTParser:
             loop_ctx = self.sync_tracker.exit_loop()
             # Verify prescan results against actual loop body observations
             self._verify_backward_deps(backward_deps, loop_ctx)
+            # Drain: emit wait_flag to consume the last iteration's body-end
+            # set_flag, balancing the event flag counter.  Drain must NOT be
+            # skipped even in nested loops — each (set_pipe, wait_pipe, event_id)
+            # triple must have strictly paired set/wait counts.
             for dep in backward_deps:
-                emit_backward_sync_dst(self.builder, dep, span)
+                if dep.n_slots > 1:
+                    for slot in range(dep.n_slots):
+                        eid = (dep.event_id + slot) % 8
+                        slot_dep = BackwardDep(dep.first_pipe, dep.last_pipe, dep.tile_name, eid, dep.loop_depth)
+                        emit_backward_sync_dst(self.builder, slot_dep, span)
+                else:
+                    emit_backward_sync_dst(self.builder, dep, span)
 
         if not is_simple_for:
             loop_result = loop.get_result()
@@ -1205,9 +1326,14 @@ class ASTParser:
         condition = self.parse_expression(stmt.test)
         span = self.span_tracker.get_span(stmt)
 
-        # Auto-sync: save pre-if buffer states
+        # Auto-sync: save pre-if buffer states and pending backward waits
         if self.sync_tracker is not None:
             self.sync_tracker.enter_if_branch()
+            # Save pending backward waits so both branches can flush them
+            import copy
+            self._pre_if_pending_backward_waits = copy.deepcopy(
+                getattr(self, "_pending_backward_waits", None)
+            )
 
         # Track yield output variable names from both branches
         then_yield_vars = []
@@ -1250,6 +1376,11 @@ class ASTParser:
                 # Auto-sync: save then-states, restore pre-if for else
                 if self.sync_tracker is not None:
                     self.sync_tracker.enter_else_branch()
+                    # Restore pending backward waits so else branch can flush them too
+                    import copy
+                    saved = getattr(self, "_pre_if_pending_backward_waits", None)
+                    if saved is not None:
+                        self._pending_backward_waits = copy.deepcopy(saved)
 
                 if_builder.else_()
                 self.scope_manager.enter_scope("else")
@@ -2479,7 +2610,12 @@ class ASTParser:
         if hasattr(ir_op.system, op_name):
             op_func = getattr(ir_op.system, op_name)
             call_span = self.span_tracker.get_span(call)
-            return op_func(*args, **kwargs, span=call_span)
+            result = op_func(*args, **kwargs, span=call_span)
+            # wait_cross_core acts as a pipeline fence: all local pipes
+            # complete while the core blocks waiting for the signal.
+            if op_name == "wait_cross_core" and self.sync_tracker is not None:
+                self.sync_tracker.pipeline_fence()
+            return result
 
         raise InvalidOperationError(
             f"Unknown system operation: {op_name}",
@@ -2541,6 +2677,9 @@ class ASTParser:
 
         # Ops with SSA block semantics — no explicit output tile needed.
         if op_name in self._MANUAL_AS_BLOCK_OPS:
+            # Auto-sync: emit forward sync before block ops too (e.g. l0c_store)
+            if self.sync_tracker is not None:
+                self._emit_forward_syncs_for_manual_op(op_name, call, span)
             return self._parse_block_op(op_name, call)
         if op_name in self._MANUAL_AS_TENSOR_OPS:
             return self._parse_tensor_op(op_name, call)
@@ -2604,50 +2743,315 @@ class ASTParser:
         if pipe is None:
             return
 
+        # Flush deferred backward waits for this pipe.
+        # Backward waits are deferred from loop body-start to the first op
+        # on each pipe, enabling pipeline overlap (e.g., load overlaps with
+        # previous matmul because M→MTE1 wait is deferred to before move).
+        self._flush_pending_backward_waits(pipe, span)
+
         access = _OP_TILE_ACCESS.get(op_name)
         if access is None:
             return
 
-        # Collect tile names from positional args
-        read_names: list[str] = []
-        write_names: list[str] = []
-        for idx in access.read_indices:
-            name = self._extract_tile_name_from_ast(call, idx)
-            if name is not None:
-                read_names.append(name)
-        for idx in access.write_indices:
-            name = self._extract_tile_name_from_ast(call, idx)
-            if name is not None:
-                write_names.append(name)
+        # Collect tile names from positional args (may be str or list[str])
+        read_raw: list[str | list[str] | None] = [
+            self._extract_tile_name_from_ast(call, i) for i in access.read_indices
+        ]
+        write_raw: list[str | list[str] | None] = [
+            self._extract_tile_name_from_ast(call, i) for i in access.write_indices
+        ]
+
+        has_db = any(isinstance(n, list) for n in read_raw + write_raw)
 
         assert self.sync_tracker is not None
-        pairs = self.sync_tracker.record_op(pipe, read_names, write_names)
-        for pair in pairs:
+
+        if not has_db:
+            # Non-DB path (existing logic)
+            read_names = [n for n in read_raw if isinstance(n, str)]
+            write_names = [n for n in write_raw if isinstance(n, str)]
+            pairs = self.sync_tracker.record_op(pipe, read_names, write_names)
+            for pair in pairs:
+                emit_sync_pair(self.builder, pair, span)
+        else:
+            # DB path: per-slot analysis + if-else sync chain
+            self._emit_db_forward_syncs(pipe, read_raw, write_raw, call, span)
+
+    def _emit_db_forward_syncs(
+        self,
+        pipe: PipeType,
+        read_raw: list[str | list[str] | None],
+        write_raw: list[str | list[str] | None],
+        call: ast.Call,
+        span: ir.Span,
+    ) -> None:
+        """Emit forward sync for double-buffer tile tuples.
+
+        Analyzes dependencies per buffer slot independently, then emits an
+        if-else chain per (set_pipe, wait_pipe) pair so the runtime selects
+        the correct per-slot event_id.
+        """
+        import copy
+        from pypto.frontend.sync_tracker import SyncPair
+
+        assert self.sync_tracker is not None
+        tracker = self.sync_tracker
+
+        # Determine n_slots from the first list[str] encountered
+        n_slots = 2
+        for n in read_raw + write_raw:
+            if isinstance(n, list):
+                n_slots = len(n)
+                break
+
+        # Extract the buf_idx IR expression from the first Subscript arg
+        index_expr = self._extract_db_index_expr(call)
+        if index_expr is None:
+            return  # cannot resolve index; skip (conservative: no sync)
+
+        # Per-slot dependency analysis with state snapshots
+        saved_states = copy.deepcopy(tracker._buffer_states)
+        slot_pairs: list[list[SyncPair]] = []
+
+        for slot in range(n_slots):
+            # Restore to same starting state for each slot
+            tracker._buffer_states = copy.deepcopy(saved_states)
+            read_names = [self._resolve_slot_name(n, slot) for n in read_raw]
+            write_names = [self._resolve_slot_name(n, slot) for n in write_raw]
+            read_names = [n for n in read_names if n is not None]
+            write_names = [n for n in write_names if n is not None]
+            pairs = tracker.record_op(pipe, read_names, write_names)
+            slot_pairs.append(pairs)
+
+        # Restore and update state: union of all slots' final state
+        # After the loop, buffer states from the last slot's record_op are
+        # in tracker._buffer_states.  We need to merge all slots' tile states.
+        merged = copy.deepcopy(saved_states)
+        for slot in range(n_slots):
+            # Re-run with correct starting state to get final per-slot state
+            tracker._buffer_states = copy.deepcopy(saved_states)
+            read_names = [self._resolve_slot_name(n, slot) for n in read_raw]
+            write_names = [self._resolve_slot_name(n, slot) for n in write_raw]
+            read_names = [n for n in read_names if n is not None]
+            write_names = [n for n in write_names if n is not None]
+            # Just update state (ignore returned pairs — we already have them)
+            tracker.record_op(pipe, read_names, write_names)
+            for tile_name, state in tracker._buffer_states.items():
+                if tile_name not in saved_states or state != saved_states.get(tile_name):
+                    merged[tile_name] = copy.deepcopy(state)
+        tracker._buffer_states = merged
+
+        # Collect unique (set_pipe, wait_pipe) pairs across all slots
+        all_pipe_keys: list[tuple[PipeType, PipeType]] = []
+        seen: set[tuple[PipeType, PipeType]] = set()
+        for pairs in slot_pairs:
+            for p in pairs:
+                key = (p.set_pipe, p.wait_pipe)
+                if key not in seen:
+                    seen.add(key)
+                    all_pipe_keys.append(key)
+
+        # Emit if-else chain for each unique pipe pair
+        from pypto.ir.op import system_ops as ir_sys_ops
+        for set_p, wait_p in all_pipe_keys:
+            # Collect per-slot event IDs
+            slot_event_ids: list[int] = []
+            for slot, pairs in enumerate(slot_pairs):
+                matching = [p for p in pairs if p.set_pipe == set_p and p.wait_pipe == wait_p]
+                if matching:
+                    base_eid = tracker._event_allocator.forward_event_id(set_p, wait_p, n_slots=n_slots)
+                    slot_event_ids.append((base_eid + slot) % tracker._event_allocator.MAX_EVENTS)
+                else:
+                    slot_event_ids.append(-1)  # sentinel: this slot has no dep
+
+            # Build if-else chain emitting sync_src + sync_dst per slot
+            self._build_db_sync_chain(set_p, wait_p, slot_event_ids, index_expr, 0, span)
+
+    def _extract_db_index_expr(self, call: ast.Call) -> ir.Expr | None:
+        """Extract the buffer-index IR expression from the first Subscript arg."""
+        for arg in call.args:
+            if isinstance(arg, ast.Subscript) and isinstance(arg.value, ast.Name):
+                if arg.value.id in self._tile_tuple_registry:
+                    return self.parse_expression(arg.slice)
+        return None
+
+    @staticmethod
+    def _resolve_slot_name(raw: str | list[str] | None, slot: int) -> str | None:
+        """Resolve a raw tile name to a specific slot's tile name."""
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            return raw
+        # list[str] from tile tuple: pick the slot-th element
+        if slot < len(raw):
+            return raw[slot]
+        return None
+
+    def _build_db_sync_chain(
+        self,
+        set_pipe: PipeType,
+        wait_pipe: PipeType,
+        slot_event_ids: list[int],
+        index_expr: ir.Expr,
+        level: int,
+        span: ir.Span,
+    ) -> None:
+        """Recursively build if-else chain emitting sync_src+sync_dst per slot.
+
+        Generates IR like:
+            if buf_idx == 0:
+                sync_src(set_pipe, wait_pipe, event_id=slot_event_ids[0])
+                sync_dst(set_pipe, wait_pipe, event_id=slot_event_ids[0])
+            else:
+                if buf_idx == 1:
+                    sync_src(set_pipe, wait_pipe, event_id=slot_event_ids[1])
+                    sync_dst(set_pipe, wait_pipe, event_id=slot_event_ids[1])
+                else: ...
+        """
+        from pypto.frontend.sync_tracker import emit_sync_pair
+        from pypto.frontend.sync_tracker.data_structures import SyncPair
+
+        n = len(slot_event_ids)
+        eid = slot_event_ids[level]
+
+        if level == n - 1:
+            # Leaf: emit unconditionally
+            if eid >= 0:
+                pair = SyncPair(set_pipe, wait_pipe, "raw", eid)
+                emit_sync_pair(self.builder, pair, span)
+            return
+
+        if eid < 0:
+            # This slot has no dependency — skip to next
+            cond = index_expr == level
+            with self.builder.if_stmt(cond, span) as if_b:
+                pass  # empty then-branch
+                if_b.else_()
+                self._build_db_sync_chain(set_pipe, wait_pipe, slot_event_ids, index_expr, level + 1, span)
+            return
+
+        cond = index_expr == level
+        with self.builder.if_stmt(cond, span) as if_b:
+            pair = SyncPair(set_pipe, wait_pipe, "raw", eid)
             emit_sync_pair(self.builder, pair, span)
+            if_b.else_()
+            self._build_db_sync_chain(set_pipe, wait_pipe, slot_event_ids, index_expr, level + 1, span)
 
-    def _extract_tile_name_from_ast(self, call: ast.Call, idx: int) -> str | None:
-        """Extract a tile variable name from a positional arg at *idx*.
+    def _build_db_slot_expr(
+        self, loop_var: ir.Var, step: ir.Expr, n_slots: int, span: ir.Span,
+    ) -> ir.Expr:
+        """Build ``(loop_var / step) % n_slots`` as an IR expression."""
+        div_expr = loop_var // step
+        mod_expr = div_expr % n_slots
+        return mod_expr
 
-        Returns the name only if the arg is a simple ``ast.Name`` that resolves
-        to a tile ``Var`` (i.e. its IR type is ``TileType``) in the current scope.
+    def _flush_pending_backward_waits(self, pipe: PipeType, span: ir.Span) -> None:
+        """Emit deferred backward waits for *pipe* and remove them from pending.
+
+        Called by ``_emit_forward_syncs_for_manual_op`` right before an op on
+        *pipe* is processed, so that the backward wait happens at the correct
+        time — e.g., ``M→MTE1`` wait is emitted before the first move (MTE1),
+        not before the first load (MTE2).
+        """
+        pending = getattr(self, "_pending_backward_waits", None)
+        if pending is None or pipe not in pending:
+            return
+        from pypto.frontend.sync_tracker import emit_backward_sync_dst
+        slot_expr = getattr(self, "_pending_backward_wait_slot_expr", None)
+        for dep in pending.pop(pipe):
+            if dep.n_slots > 1 and slot_expr is not None:
+                self._emit_backward_db_sync_chain(dep, slot_expr, emit_backward_sync_dst, span)
+            else:
+                emit_backward_sync_dst(self.builder, dep, span)
+
+    def _flush_all_pending_backward_waits(self, span: ir.Span) -> None:
+        """Emit ALL remaining deferred backward waits.
+
+        Called before entering a nested for-loop to ensure outer-loop backward
+        waits are emitted before the inner loop overwrites ``_pending_backward_waits``.
+        """
+        pending = getattr(self, "_pending_backward_waits", None)
+        if not pending:
+            return
+        from pypto.frontend.sync_tracker import emit_backward_sync_dst
+        slot_expr = getattr(self, "_pending_backward_wait_slot_expr", None)
+        for pipe in list(pending.keys()):
+            for dep in pending.pop(pipe):
+                if dep.n_slots > 1 and slot_expr is not None:
+                    self._emit_backward_db_sync_chain(dep, slot_expr, emit_backward_sync_dst, span)
+                else:
+                    emit_backward_sync_dst(self.builder, dep, span)
+
+    def _emit_backward_db_sync_chain(
+        self,
+        dep: "BackwardDep",
+        slot_expr: ir.Expr,
+        emit_fn: "Callable",
+        span: ir.Span,
+    ) -> None:
+        """Emit per-slot backward sync via if-else chain on *slot_expr*."""
+        self._build_backward_db_chain(dep, slot_expr, emit_fn, 0, span)
+
+    def _build_backward_db_chain(
+        self,
+        dep: "BackwardDep",
+        slot_expr: ir.Expr,
+        emit_fn: "Callable",
+        level: int,
+        span: ir.Span,
+    ) -> None:
+        from pypto.frontend.sync_tracker.data_structures import BackwardDep as BD
+        n = dep.n_slots
+        eid = (dep.event_id + level) % 8
+        slot_dep = BD(dep.first_pipe, dep.last_pipe, dep.tile_name, eid, dep.loop_depth)
+
+        if level == n - 1:
+            emit_fn(self.builder, slot_dep, span)
+            return
+
+        cond = slot_expr == level
+        with self.builder.if_stmt(cond, span) as if_b:
+            emit_fn(self.builder, slot_dep, span)
+            if_b.else_()
+            self._build_backward_db_chain(dep, slot_expr, emit_fn, level + 1, span)
+
+    def _extract_tile_name_from_ast(self, call: ast.Call, idx: int) -> str | list[str] | None:
+        """Extract tile variable name(s) from a positional arg at *idx*.
+
+        Returns:
+            ``str`` for a simple tile variable (e.g. ``tile_a``).
+            ``list[str]`` for a tile-tuple subscript (e.g. ``tile_buf[buf_idx]``),
+            containing all tile names in the tuple.
+            ``None`` if the arg cannot be resolved to a tile.
         """
         if idx >= len(call.args):
             return None
         arg = call.args[idx]
-        if not isinstance(arg, ast.Name):
-            return None
-        var = self.scope_manager.lookup_var(arg.id)
-        if var is None:
-            return None
-        var_type = getattr(var, "type", None)
-        if var_type is None:
-            return None
-        if not isinstance(var_type, ir.TileType):
-            return None
-        return arg.id
+
+        # Path 1: simple variable name → single tile
+        if isinstance(arg, ast.Name):
+            var = self.scope_manager.lookup_var(arg.id)
+            if var is None:
+                return None
+            var_type = getattr(var, "type", None)
+            if var_type is None or not isinstance(var_type, ir.TileType):
+                return None
+            return arg.id
+
+        # Path 2: tile_buf[buf_idx] subscript → all tiles in the tuple
+        if isinstance(arg, ast.Subscript) and isinstance(arg.value, ast.Name):
+            tuple_name = arg.value.id
+            if tuple_name in self._tile_tuple_registry:
+                return self._tile_tuple_registry[tuple_name]
+
+        return None
 
     def _resolve_move_pipe(self, call: ast.Call) -> PipeType:
-        """Resolve the pipeline for a ``move`` op from its keyword args."""
+        """Resolve the pipeline for a ``move`` op.
+
+        DSL signature: ``plm.move(out, tile)`` where arg0=out (target),
+        arg1=tile (source).  The pipe is determined by the source and target
+        memory spaces (e.g. Mat→Left = MTE1).
+        """
         from pypto.frontend.sync_tracker import get_move_pipe
 
         src_memory: MemorySpace | None = None
@@ -2657,20 +3061,12 @@ class ASTParser:
                 src_memory = _MEMORY_SPACE_MAP.get(kw.value.attr)
             elif kw.arg == "target_memory" and isinstance(kw.value, ast.Attribute):
                 target_memory = _MEMORY_SPACE_MAP.get(kw.value.attr)
-        # Also try to resolve from positional arg[1] if it's a memory space
-        if target_memory is None and len(call.args) >= 2:
-            arg1 = call.args[1]
-            if isinstance(arg1, ast.Attribute):
-                target_memory = _MEMORY_SPACE_MAP.get(arg1.attr)
-        # Try to resolve src_memory from the tile's type
-        if src_memory is None and len(call.args) >= 1:
-            arg0 = call.args[0]
-            if isinstance(arg0, ast.Name):
-                var = self.scope_manager.lookup_var(arg0.id)
-                if var is not None:
-                    var_type = getattr(var, "type", None)
-                    if var_type is not None and hasattr(var_type, "memory_space"):
-                        src_memory = var_type.memory_space
+        # Resolve target_memory from arg0 (out tile)
+        if target_memory is None and len(call.args) >= 1:
+            target_memory = self._resolve_tile_arg_memory_space(call.args[0])
+        # Resolve src_memory from arg1 (source tile)
+        if src_memory is None and len(call.args) >= 2:
+            src_memory = self._resolve_tile_arg_memory_space(call.args[1])
         return get_move_pipe(src_memory, target_memory)
 
     def _resolve_store_pipe(self, call: ast.Call, op_name: str) -> PipeType:
@@ -2685,17 +3081,46 @@ class ASTParser:
         from pypto.frontend.sync_tracker import get_store_pipe
 
         # DSL convention: arg[1] is the source tile
-        tile_arg_idx = 1
         src_memory: MemorySpace | None = None
-        if tile_arg_idx < len(call.args):
-            arg = call.args[tile_arg_idx]
-            if isinstance(arg, ast.Name):
-                var = self.scope_manager.lookup_var(arg.id)
-                if var is not None:
-                    var_type = getattr(var, "type", None)
-                    if var_type is not None and hasattr(var_type, "memory_space"):
-                        src_memory = var_type.memory_space
+        if 1 < len(call.args):
+            src_memory = self._resolve_tile_arg_memory_space(call.args[1])
         return get_store_pipe(src_memory)
+
+    def _resolve_tile_arg_memory_space(self, arg: ast.expr) -> MemorySpace | None:
+        """Resolve the memory space of a tile argument (Name or Subscript).
+
+        For ``ast.Name``: looks up the variable in scope and reads its
+        ``type.memref.memory_space_``.
+        For ``ast.Subscript`` (e.g. ``tile_buf[buf_idx]``): looks up the first
+        tile in the tuple from ``_tile_tuple_registry`` — all tiles in a tuple
+        share the same TileType, so any element gives the correct memory space.
+        """
+        def _get_memory_space_from_var(var_name: str) -> MemorySpace | None:
+            var = self.scope_manager.lookup_var(var_name)
+            if var is None:
+                return None
+            var_type = getattr(var, "type", None)
+            if var_type is None:
+                return None
+            # TileType stores memory space in memref.memory_space_
+            memref = getattr(var_type, "memref", None)
+            if memref is not None:
+                return getattr(memref, "memory_space_", None)
+            # Fallback: direct memory_space attribute
+            return getattr(var_type, "memory_space", None)
+
+        # Path 1: simple variable name
+        if isinstance(arg, ast.Name):
+            return _get_memory_space_from_var(arg.id)
+
+        # Path 2: tile_buf[buf_idx] — resolve from first tuple element
+        if isinstance(arg, ast.Subscript) and isinstance(arg.value, ast.Name):
+            tuple_name = arg.value.id
+            if tuple_name in self._tile_tuple_registry:
+                first_tile_name = self._tile_tuple_registry[tuple_name][0]
+                return _get_memory_space_from_var(first_tile_name)
+
+        return None
 
     def _register_tile_region(self, var_name: str, var: ir.Var) -> None:
         """Extract MemRef from a tile Var and register with sync tracker."""

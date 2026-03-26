@@ -50,12 +50,12 @@ class TestSyncTracker:
         assert pairs == []
 
     def test_same_pipe_sync_enabled(self):
-        """same_pipe_sync=True: V→V RAW emits a V→V sync (required on a2/a3)."""
+        """same_pipe_sync=True: V→V RAW emits MTE2→V sync (hardware surrogate on a2/a3)."""
         tracker = SyncTracker(same_pipe_sync=True)
         tracker.record_op(PipeType.V, [], ["tile_a"])   # write on V
         pairs = tracker.record_op(PipeType.V, ["tile_a"], [])  # read on V
         assert len(pairs) == 1
-        assert pairs[0].set_pipe == PipeType.V
+        assert pairs[0].set_pipe == PipeType.MTE2  # surrogate for V→V
         assert pairs[0].wait_pipe == PipeType.V
         assert pairs[0].dep_type == "raw"
 
@@ -136,7 +136,7 @@ class TestSyncTracker:
         assert all(p.dep_type != "war" for p in pairs)
 
     def test_loop_enter_exit_restores_state(self):
-        """enter_loop / exit_loop restores pre-loop buffer state."""
+        """exit_loop merges loop body's last_write_pipe into restored state."""
         tracker = SyncTracker()
         tracker.record_op(PipeType.MTE2, [], ["tile_a"])  # write on MTE2
 
@@ -144,23 +144,28 @@ class TestSyncTracker:
         tracker.record_op(PipeType.V, [], ["tile_a"])  # write on V inside loop
         loop_ctx = tracker.exit_loop()
 
-        # After exit_loop, state is restored: tile_a was last written by MTE2
+        # After exit_loop, tile_a's last_write_pipe is V (from loop body),
+        # not MTE2 (from snapshot).  Post-loop code sees the loop's final write.
         pairs = tracker.record_op(PipeType.V, ["tile_a"], [])
+        assert pairs == []  # same pipe, no sync needed
+
+        # But reading on a different pipe triggers sync from V
+        pairs = tracker.record_op(PipeType.MTE2, ["tile_a"], [])
         assert len(pairs) == 1
-        assert pairs[0].set_pipe == PipeType.MTE2
+        assert pairs[0].set_pipe == PipeType.V
         # LoopContext should have captured access info
         assert isinstance(loop_ctx, LoopContext)
 
     def test_event_id_assignment(self):
-        """Different pipe pairs get different event IDs."""
+        """Per-pipe-pair allocation: different pipe pairs start at 0 independently."""
         tracker = SyncTracker()
         tracker.record_op(PipeType.MTE2, [], ["tile_a"])
         tracker.record_op(PipeType.M, [], ["tile_b"])
         pairs = tracker.record_op(PipeType.V, ["tile_a", "tile_b"], [])
         assert len(pairs) == 2
-        event_ids = {p.event_id for p in pairs}
-        # Two different pipe pairs should get different event IDs
-        assert len(event_ids) == 2
+        # Both (MTE2→V) and (M→V) are different pipe pairs, each starts at 0
+        for p in pairs:
+            assert p.event_id == 0
 
     def test_same_pipe_pair_same_event_id(self):
         """Same pipe pair reuses the same event ID."""
@@ -182,10 +187,13 @@ class TestEventIdAllocator:
         assert id1 == id2
 
     def test_different_pairs_return_different_ids(self):
+        """Different pipe pairs get independent ID pools (both start at 0)."""
         alloc = EventIdAllocator()
         id1 = alloc.forward_event_id(PipeType.MTE2, PipeType.V)
         id2 = alloc.forward_event_id(PipeType.M, PipeType.V)
-        assert id1 != id2
+        # Per-pipe-pair: both start at 0 independently
+        assert id1 == 0
+        assert id2 == 0
 
     def test_wrap_around_at_max_events(self):
         alloc = EventIdAllocator()
@@ -200,12 +208,13 @@ class TestEventIdAllocator:
         assert all(0 <= eid < EventIdAllocator.MAX_EVENTS for eid in ids)
 
     def test_backward_uses_separate_pool(self):
+        """Forward and backward on same pipe pair get different IDs."""
         alloc = EventIdAllocator()
         fwd = alloc.forward_event_id(PipeType.MTE2, PipeType.V)
         bwd = alloc.backward_event_id(PipeType.MTE2, PipeType.V, 0)
-        # Both pools start at 0, so the first allocation in each returns 0
+        # Same pipe pair: forward gets 0, backward gets 1 (next available)
         assert fwd == 0
-        assert bwd == 0
+        assert bwd == 1
 
     def test_different_depths_get_different_ids(self):
         alloc = EventIdAllocator()
@@ -218,9 +227,9 @@ class TestEventIdAllocator:
         alloc.forward_event_id(PipeType.MTE2, PipeType.V)
         alloc.backward_event_id(PipeType.V, PipeType.MTE2, 0)
         alloc.reset()
-        # After reset, first allocation starts from 0 again
-        assert alloc.forward_event_id(PipeType.M, PipeType.V) == 0
-        assert alloc.backward_event_id(PipeType.M, PipeType.V, 0) == 0
+        # After reset, all pipe pair counters restart from 0
+        assert alloc.forward_event_id(PipeType.MTE2, PipeType.V) == 0
+        assert alloc.backward_event_id(PipeType.V, PipeType.MTE2, 0) == 0
 
 
 class TestTileRegion:

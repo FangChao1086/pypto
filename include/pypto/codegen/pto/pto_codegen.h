@@ -314,6 +314,11 @@ class PTOCodegen : public CodegenBase {
   /// IfStmt reconstruction then rebuilds the actual object (alloc_tile / addptr+make_tensor_view).
   int indirect_select_depth_ = 0;
 
+  /// Set of IR var names mapped directly to an i64 addr_ssa (not yet reconstructed as tile_buf).
+  /// Populated when an inner nested IfStmt (indirect_select_depth_ > 0) skips pto.alloc_tile
+  /// reconstruction so the outer yield can propagate the addr without overriding with static memref addr.
+  std::set<std::string> indirect_addr_vars_;
+
   // Current function context
   ir::FunctionPtr current_function_;
   std::string current_result_buf_;

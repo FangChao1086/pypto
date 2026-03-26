@@ -28,7 +28,7 @@ Typical usage:
 """
 
 # Import the kernel decorator
-from .kernel import kernel
+from .kernel import kernel, KernelDef
 from .jit import jit, compile, launch
 
 # Import MemorySpace for manual address specification
@@ -37,6 +37,7 @@ from pypto.pypto_core.ir import MemorySpace
 __all__ = [
     # Primary new API
     "kernel",
+    "KernelDef",
     "jit",
     "compile",
     "launch"
