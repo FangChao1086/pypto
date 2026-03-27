@@ -1796,7 +1796,11 @@ class ASTParser:
                 if python_obj is not None:
                     # Temporarily inject python_vars into closure_vars for eval_expr()
                     prev_closure_vars = self.expr_evaluator.closure_vars
-                    self.expr_evaluator.closure_vars = {**prev_closure_vars, **self.scope_manager.python_vars}
+                    current_scope_vars = {}
+                    if self.scope_manager.scopes:
+                        for scope in reversed(self.scope_manager.scopes):
+                            current_scope_vars.update(scope)
+                    self.expr_evaluator.closure_vars = {**prev_closure_vars, **self.scope_manager.python_vars, **current_scope_vars}
                     try:
                         return self.expr_evaluator.eval_expr(call)
                     finally:
