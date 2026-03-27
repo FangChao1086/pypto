@@ -27,7 +27,7 @@ from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.builder import IRBuilder
-from pypto.ir.op import block, tensor as tensor_op
+from pypto.ir.op import block, debug as debug_op
 from pypto.ir.pto_codegen import (
     _generate_arg_unpacking,
     _generate_kernel_wrapper,
@@ -241,22 +241,64 @@ def test_pto_codegen_tensor_parameters():
     assert "!pto.tensor_view<?x?xf32>" in mlir_code
 
 
-def test_tensor_print_ir_returns_unknown_type():
-    """tensor.print IR helper should return UnknownType."""
+def test_debug_dump_tensor_ir_returns_unknown_type():
+    """debug.dump_tensor IR helper should return UnknownType."""
     span = ir.Span.unknown()
     tensor_var = ir.Var("input", ir.TensorType([48, 64], DataType.FP32), span)
 
-    call = tensor_op.print_(tensor_var)
+    call = debug_op.dump_tensor_(tensor_var)
 
     assert isinstance(call.type, ir.UnknownType)
 
 
-def test_block_print_ir_returns_unknown_type():
-    """block.print IR helper should return UnknownType."""
+def test_debug_dump_tile_ir_returns_unknown_type():
+    """debug.dump_tile IR helper should return UnknownType."""
     span = ir.Span.unknown()
     tile_var = ir.Var("tile", ir.TileType([16, 16], DataType.FP32), span)
 
-    call = block.print_(tile_var)
+    call = debug_op.dump_tile_(tile_var)
+
+    assert isinstance(call.type, ir.UnknownType)
+
+
+def test_debug_printf_ir_returns_unknown_type():
+    """debug.printf IR helper should return UnknownType."""
+    span = ir.Span.unknown()
+    scalar_var = ir.Var("value", ir.ScalarType(DataType.INT32), span)
+
+    call = debug_op.printf_("value=%d", scalar_var)
+
+    assert isinstance(call.type, ir.UnknownType)
+
+
+def test_debug_printf_extended_types_return_unknown_type():
+    """debug.printf should accept signed/unsigned/index/bool types per v1 policy."""
+    span = ir.Span.unknown()
+    int_var = ir.Var("int_value", ir.ScalarType(DataType.INT32), span)
+    bool_var = ir.Var("bool_value", ir.ScalarType(DataType.BOOL), span)
+    index_var = ir.Var("index_value", ir.ScalarType(DataType.INDEX), span)
+    uint_var = ir.Var("uint_value", ir.ScalarType(DataType.UINT32), span)
+    fp32_var = ir.Var("fp32_value", ir.ScalarType(DataType.FP32), span)
+
+    call = debug_op.printf_("%i %d %x %u %f", int_var, bool_var, index_var, uint_var, fp32_var)
+
+    assert isinstance(call.type, ir.UnknownType)
+
+
+def test_debug_printf_python_bool_returns_unknown_type():
+    """debug.printf should accept direct Python bool for %d/%u/%i."""
+    call = debug_op.printf_("flag=%d", True)
+
+    assert isinstance(call.type, ir.UnknownType)
+
+    call_unsigned = debug_op.printf_("flag=%u", True)
+
+    assert isinstance(call_unsigned.type, ir.UnknownType)
+
+
+def test_debug_printf_pure_text_returns_unknown_type():
+    """debug.printf should accept pure text with zero scalar arguments."""
+    call = debug_op.printf_("hello world")
 
     assert isinstance(call.type, ir.UnknownType)
 
@@ -286,6 +328,122 @@ def test_pto_codegen_alloc_tile():
     assert "loc=vec" in mlir_code  # Vector buffer (PTO address space)
     assert "dtype=f32" in mlir_code
     assert "rows=32, cols=32" in mlir_code
+
+
+def test_pto_codegen_printf_lowering():
+    """plm.printf should lower to one pto.print per scalar argument."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class PrintfProgram:
+        @pl.function
+        def printf_test(
+            self,
+            input: pl.Tensor[[16, 16], pl.INT32],
+            output: pl.Tensor[[16, 16], pl.INT32],
+            x: pl.Scalar[pl.INT32],
+            y: pl.Scalar[pl.UINT32],
+            z: pl.Scalar[pl.FP32],
+        ):
+            plm.printf("x=%d y=%x z=%f\n", x, y, z)
+            tile = pl.load(input, offsets=[0, 0], shapes=[16, 16])
+            pl.store(tile, offsets=[0, 0], shapes=[16, 16], output_tensor=output)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(PrintfProgram)
+
+    codegen_obj = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+    assert mlir_code.count("pto.print") == 3
+    assert 'pto.print ins("x=%d", ' in mlir_code
+    assert 'pto.print ins(" y=%llx", ' in mlir_code
+    assert 'pto.print ins(" z=%f\\n", ' in mlir_code
+
+
+def test_pto_codegen_printf_pure_text_lowering():
+    """plm.printf should lower pure text to a single pto.print with a dummy scalar."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class PrintfTextProgram:
+        @pl.function
+        def printf_text_test(
+            self,
+            input: pl.Tensor[[16, 16], pl.INT32],
+            output: pl.Tensor[[16, 16], pl.INT32],
+        ):
+            plm.printf("hello world\n")
+            tile = pl.load(input, offsets=[0, 0], shapes=[16, 16])
+            pl.store(tile, offsets=[0, 0], shapes=[16, 16], output_tensor=output)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(PrintfTextProgram)
+
+    codegen_obj = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+
+    assert mlir_code.count("pto.print") == 1
+    assert 'pto.print ins("hello world\\n", ' in mlir_code
+    assert "arith.constant 0 : i32" in mlir_code
+
+
+def test_pto_codegen_printf_accepts_common_flags_width_precision():
+    """plm.printf should accept common flags, width, and precision syntax."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class PrintfModifierProgram:
+        @pl.function
+        def printf_modifier_test(
+            self,
+            input: pl.Tensor[[16, 16], pl.INT32],
+            output: pl.Tensor[[16, 16], pl.INT32],
+            hex_value: pl.Scalar[pl.UINT32],
+            float_value: pl.Scalar[pl.FP32],
+        ):
+            plm.printf("hex=%#08x f=%+08.3f\n", hex_value, float_value)
+            tile = pl.load(input, offsets=[0, 0], shapes=[16, 16])
+            pl.store(tile, offsets=[0, 0], shapes=[16, 16], output_tensor=output)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(PrintfModifierProgram)
+
+    codegen_obj = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+    print(mlir_code)
+    assert 'pto.print ins("hex=%#08llx", ' in mlir_code
+    assert 'pto.print ins(" f=%+08.3f\\n", ' in mlir_code
+
+
+def test_pto_codegen_preserves_unsigned_mlir_types_outside_printf():
+    """Non-printf PTO codegen should keep unsigned MLIR types instead of forcing signless."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class UnsignedTypeProgram:
+        @pl.function
+        def unsigned_type_test(
+            self,
+            input: pl.Tensor[[16, 16], pl.UINT8],
+            output: pl.Tensor[[16, 16], pl.UINT8],
+            scalar: pl.Scalar[pl.UINT32],
+        ) -> pl.Scalar[pl.UINT32]:
+            tile = pl.load(input, offsets=[0, 0], shapes=[16, 16])
+            pl.store(tile, offsets=[0, 0], shapes=[16, 16], output_tensor=output)
+            return scalar
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(UnsignedTypeProgram)
+
+    codegen_obj = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+
+    assert "!pto.ptr<ui8>" in mlir_code
+    assert "ui32" in mlir_code
 
 
 def test_pto_codegen_block_load_lowering():

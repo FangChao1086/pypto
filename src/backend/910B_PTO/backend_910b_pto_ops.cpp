@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cctype>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -266,7 +267,7 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
   auto build_tile_buf_type = [&](const TileType* tile_type, const ir::MakeTuple* shapes_tuple = nullptr,
                                  const ir::MakeTuple* offsets_tuple = nullptr) {
     INTERNAL_CHECK(tile_type) << "tile type must not be null";
-    INTERNAL_CHECK(tile_type->shape_.size() == 2) << "block.print tile window currently only supports 2D tiles";
+    INTERNAL_CHECK(tile_type->shape_.size() == 2) << "debug.dump_tile window currently only supports 2D tiles";
     std::string loc = tile_type->memref_.has_value()
                           ? memory_space_to_mlir(tile_type->memref_.value()->memory_space_)
                           : "vec";
@@ -318,11 +319,11 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   if (op->args_.size() == 3) {
     auto tile_type = As<TileType>(op->args_[0]->GetType());
-    INTERNAL_CHECK(tile_type) << "block.print first argument must have TileType";
+    INTERNAL_CHECK(tile_type) << "debug.dump_tile first argument must have TileType";
     auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
-    INTERNAL_CHECK(offsets_tuple) << "block.print second argument must be a tuple (offsets)";
+    INTERNAL_CHECK(offsets_tuple) << "debug.dump_tile second argument must be a tuple (offsets)";
     auto shapes_tuple = As<ir::MakeTuple>(op->args_[2]);
-    INTERNAL_CHECK(shapes_tuple) << "block.print third argument must be a tuple (shapes)";
+    INTERNAL_CHECK(shapes_tuple) << "debug.dump_tile third argument must be a tuple (shapes)";
 
     std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
     if (src_type.empty()) {
@@ -340,7 +341,7 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
     for (size_t i = 0; i < shapes_tuple->elements_.size(); ++i) {
       if (i > 0) subset_line << ", ";
       auto dim = As<ir::ConstInt>(shapes_tuple->elements_[i]);
-      INTERNAL_CHECK(dim) << "block.print shape must be static ConstInt at axis " << i;
+      INTERNAL_CHECK(dim) << "debug.dump_tile shape must be static ConstInt at axis " << i;
       subset_line << dim->value_;
     }
     subset_line << "] : " << src_type;
@@ -361,6 +362,260 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
   return "";
 }
 
+struct PrintfSegment {
+  std::string format_segment;
+  char conversion;
+};
+
+static bool IsUnsignedMlirIntType(const std::string& type) {
+  return type == "ui8" || type == "ui16" || type == "ui32" || type == "ui64";
+}
+
+static std::string GetUnsignedPrintfTargetType(const std::string& type) {
+  if (type == "ui8" || type == "ui16") {
+    return "i32";
+  }
+  if (type == "ui32" || type == "ui64") {
+    return "i64";
+  }
+  return "";
+}
+
+static bool IsSupportedPrintfConversion(char conversion) {
+  return conversion == 'd' || conversion == 'i' || conversion == 'u' || conversion == 'x' ||
+         conversion == 'f';
+}
+
+static size_t FindPrintfConversionIndex(const std::string& format_segment) {
+  size_t i = 0;
+  while (i < format_segment.size()) {
+    if (format_segment[i] != '%') {
+      ++i;
+      continue;
+    }
+    CHECK(!(i + 1 < format_segment.size() && format_segment[i + 1] == '%'))
+        << "debug.printf does not support literal '%%'";
+
+    size_t j = i + 1;
+    while (j < format_segment.size()) {
+      char c = format_segment[j];
+      if (c == '-' || c == '+' || c == ' ' || c == '#' || c == '0') {
+        ++j;
+      } else {
+        break;
+      }
+    }
+    while (j < format_segment.size() && std::isdigit(static_cast<unsigned char>(format_segment[j]))) {
+      ++j;
+    }
+    if (j < format_segment.size() && format_segment[j] == '.') {
+      ++j;
+      CHECK(j < format_segment.size() && std::isdigit(static_cast<unsigned char>(format_segment[j])))
+          << "debug.printf precision must be followed by digits";
+      while (j < format_segment.size() && std::isdigit(static_cast<unsigned char>(format_segment[j]))) {
+        ++j;
+      }
+    }
+    CHECK(j < format_segment.size()) << "debug.printf format ends with an incomplete conversion";
+    CHECK(IsSupportedPrintfConversion(format_segment[j]))
+        << "debug.printf does not support conversion '%" << format_segment[j] << "'";
+    return j;
+  }
+  CHECK(false) << "debug.printf format segment must contain a supported conversion";
+  return std::string::npos;
+}
+
+static std::string RewritePrintfFormatForScalarType(const std::string& format_segment, char conversion,
+                                                    const std::string& scalar_type) {
+  if (scalar_type != "i64") {
+    return format_segment;
+  }
+
+  std::string replacement;
+  switch (conversion) {
+    case 'd':
+      replacement = "lld";
+      break;
+    case 'i':
+      replacement = "lli";
+      break;
+    case 'u':
+      replacement = "llu";
+      break;
+    case 'x':
+      replacement = "llx";
+      break;
+    default:
+      return format_segment;
+  }
+
+  size_t conv_idx = FindPrintfConversionIndex(format_segment);
+  size_t percent_idx = format_segment.rfind('%', conv_idx);
+  INTERNAL_CHECK(percent_idx != std::string::npos)
+      << "debug.printf failed to locate '%' while rewriting 64-bit format segment";
+
+  std::string rewritten = format_segment;
+  rewritten.replace(conv_idx, 1, replacement);
+  return rewritten;
+}
+
+static std::string EscapeMlirStringLiteral(const std::string& text) {
+  std::ostringstream oss;
+  oss << "\"";
+  for (char c : text) {
+    switch (c) {
+      case '\\':
+        oss << "\\\\";
+        break;
+      case '"':
+        oss << "\\\"";
+        break;
+      case '\n':
+        oss << "\\n";
+        break;
+      case '\t':
+        oss << "\\t";
+        break;
+      case '\r':
+        oss << "\\r";
+        break;
+      default:
+        oss << c;
+        break;
+    }
+  }
+  oss << "\"";
+  return oss.str();
+}
+
+static std::vector<PrintfSegment> ParsePrintfSegments(const std::string& format) {
+  std::vector<PrintfSegment> segments;
+  std::string pending_text;
+  size_t i = 0;
+  while (i < format.size()) {
+    if (format[i] != '%') {
+      pending_text.push_back(format[i]);
+      ++i;
+      continue;
+    }
+    if (i + 1 < format.size() && format[i + 1] == '%') {
+      CHECK(false) << "debug.printf does not support literal '%%'";
+    }
+
+    size_t j = i + 1;
+    while (j < format.size()) {
+      char c = format[j];
+      if (c == '-' || c == '+' || c == ' ' || c == '#' || c == '0') {
+        ++j;
+      } else {
+        break;
+      }
+    }
+    while (j < format.size() && std::isdigit(static_cast<unsigned char>(format[j]))) {
+      ++j;
+    }
+    if (j < format.size() && format[j] == '.') {
+      ++j;
+      CHECK(j < format.size() && std::isdigit(static_cast<unsigned char>(format[j])))
+          << "debug.printf precision must be followed by digits";
+      while (j < format.size() && std::isdigit(static_cast<unsigned char>(format[j]))) {
+        ++j;
+      }
+    }
+
+    CHECK(j < format.size()) << "debug.printf format ends with an incomplete conversion";
+    char conversion = format[j];
+    CHECK(IsSupportedPrintfConversion(conversion))
+        << "debug.printf does not support conversion '%" << conversion << "'";
+
+    segments.push_back({pending_text + format.substr(i, j - i + 1), conversion});
+    pending_text.clear();
+    i = j + 1;
+  }
+
+  if (!pending_text.empty()) {
+    if (segments.empty()) {
+      return segments;
+    }
+    segments.back().format_segment += pending_text;
+  }
+  return segments;
+}
+
+static std::string MakeDebugPrintfCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+
+  std::string format = op->GetKwarg<std::string>("format");
+  auto segments = ParsePrintfSegments(format);
+  if (segments.empty()) {
+    CHECK(op->args_.empty()) << "debug.printf format expects 0 scalar arguments, but got " << op->args_.size();
+    std::string dummy = codegen.NewTemp();
+    codegen.Emit(dummy + " = arith.constant 0 : i32");
+    codegen.Emit("pto.print ins(" + EscapeMlirStringLiteral(format) + ", " + dummy + " : i32)");
+    return "";
+  }
+  CHECK(segments.size() == op->args_.size()) << "debug.printf lowered segment count (" << segments.size()
+                                             << ") must match scalar arg count (" << op->args_.size() << ")";
+
+  for (size_t i = 0; i < segments.size(); ++i) {
+    std::string scalar = codegen.GetExprAsCode(op->args_[i]);
+    std::string scalar_type = codegen.GetExprTypeAnnotation(op->args_[i]);
+    INTERNAL_CHECK(!scalar_type.empty()) << "debug.printf scalar argument " << i << " is missing type annotation";
+
+    if ((segments[i].conversion == 'd' || segments[i].conversion == 'i' || segments[i].conversion == 'u') &&
+        scalar_type == "i1") {
+      std::string casted = codegen.NewTemp();
+      codegen.Emit(casted + " = arith.extui " + scalar + " : i1 to i32");
+      scalar = casted;
+      scalar_type = "i32";
+    }
+
+    if ((segments[i].conversion == 'd' || segments[i].conversion == 'i' ||
+         segments[i].conversion == 'u' || segments[i].conversion == 'x') &&
+        scalar_type == "index") {
+      std::string casted = codegen.NewTemp();
+      codegen.Emit(casted + " = arith.index_cast " + scalar + " : index to i64");
+      scalar = casted;
+      scalar_type = "i64";
+    }
+
+    if ((segments[i].conversion == 'u' || segments[i].conversion == 'x') &&
+        IsUnsignedMlirIntType(scalar_type)) {
+      // Approximate unsigned printf support by materializing a wider signless
+      // integer temporary before emitting pto.print:
+      //   ui8/ui16 -> i32
+      //   ui32/ui64 -> i64
+      //
+      // This keeps values stable for UINT8/16/32. UINT64 is only conditionally
+      // trustworthy here: values <= INT64_MAX remain faithful after the cast,
+      // while larger runtime UINT64 values are not guaranteed to print
+      // correctly with the current route.
+      std::string casted = codegen.NewTemp();
+      std::string target_type = GetUnsignedPrintfTargetType(scalar_type);
+      INTERNAL_CHECK(!target_type.empty())
+          << "debug.printf failed to choose target signless type for unsigned scalar " << scalar_type;
+      codegen.Emit(casted + " = builtin.unrealized_conversion_cast " + scalar + " : " + scalar_type + " to " +
+                   target_type);
+      scalar = casted;
+      scalar_type = target_type;
+    }
+
+    INTERNAL_CHECK(!(segments[i].conversion == 'x' && scalar_type == "i1"))
+        << "debug.printf %x does not support bool scalars";
+    INTERNAL_CHECK(!(segments[i].conversion == 'f' && scalar_type != "f32"))
+        << "debug.printf %f requires f32 operand after frontend/IR validation, but got " << scalar_type;
+
+    std::string rewritten_format =
+        RewritePrintfFormatForScalarType(segments[i].format_segment, segments[i].conversion, scalar_type);
+
+    std::ostringstream oss;
+    oss << "pto.print ins(" << EscapeMlirStringLiteral(rewritten_format) << ", " << scalar << " : "
+        << scalar_type << ")";
+    codegen.Emit(oss.str());
+  }
+  return "";
+}
+
 static std::string GetStaticPartitionType(const ir::MakeTuple* shapes_tuple, const std::string& dtype_str) {
   std::ostringstream oss;
   oss << "!pto.partition_tensor_view<";
@@ -376,19 +631,19 @@ static std::string GetStaticPartitionType(const ir::MakeTuple* shapes_tuple, con
 
 static std::string MakeTensorPrintCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 3) << "tensor.print requires 3 arguments, but got " << op->args_.size();
+  CHECK(op->args_.size() == 3) << "debug.dump_tensor requires 3 arguments, but got " << op->args_.size();
 
   auto tensor = As<Var>(op->args_[0]);
-  INTERNAL_CHECK(tensor) << "tensor.print first argument must be a Var";
+  INTERNAL_CHECK(tensor) << "debug.dump_tensor first argument must be a Var";
 
   auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
-  INTERNAL_CHECK(offsets_tuple) << "tensor.print second argument must be a tuple (offsets)";
+  INTERNAL_CHECK(offsets_tuple) << "debug.dump_tensor second argument must be a tuple (offsets)";
 
   auto shapes_tuple = As<ir::MakeTuple>(op->args_[2]);
-  INTERNAL_CHECK(shapes_tuple) << "tensor.print third argument must be a tuple (shapes)";
+  INTERNAL_CHECK(shapes_tuple) << "debug.dump_tensor third argument must be a tuple (shapes)";
 
   auto tensor_type = As<TensorType>(tensor->GetType());
-  INTERNAL_CHECK(tensor_type) << "tensor.print tensor argument must have TensorType";
+  INTERNAL_CHECK(tensor_type) << "debug.dump_tensor tensor argument must have TensorType";
 
   std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
@@ -772,7 +1027,7 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.mrgsort")
       return MakeMrgSortCodegenPTO("pto.tmrgsort", op, codegen);
     });
 
-REGISTER_BACKEND_OP(Backend910B_PTO, "block.print")
+REGISTER_BACKEND_OP(Backend910B_PTO, "debug.dump_tile")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakePrintCodegenPTO("pto.tprint", op, codegen);
@@ -784,10 +1039,16 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.dim")
       return MakeTensorDimCodegenPTO(op, codegen);
     });
 
-REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.print")
+REGISTER_BACKEND_OP(Backend910B_PTO, "debug.dump_tensor")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeTensorPrintCodegenPTO(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "debug.printf")
+    .set_pipe(ir::PipeType::S)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeDebugPrintfCodegenPTO(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.reshape")

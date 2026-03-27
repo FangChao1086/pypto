@@ -2623,6 +2623,53 @@ class ASTParser:
             hint=f"Check if '{op_name}' is a valid system operation",
         )
 
+    def _parse_debug_op(self, op_name: str, call: ast.Call) -> ir.Expr:
+        """Parse debug operation."""
+        call_span = self.span_tracker.get_span(call)
+
+        if op_name in {"dump_tensor", "dump_tile"}:
+            args = [self.parse_expression(arg) for arg in call.args]
+            kwargs = self._parse_op_kwargs(call)
+            ir_op_name = self._DEBUG_OP_NAME_MAP.get(op_name, op_name)
+            if hasattr(ir_op.debug, ir_op_name):
+                op_func = getattr(ir_op.debug, ir_op_name)
+                return op_func(*args, **kwargs, span=call_span)
+
+            raise InvalidOperationError(
+                f"Unknown debug operation: {op_name}",
+                span=call_span,
+                hint=f"Check if '{op_name}' is a valid debug operation",
+            )
+
+        if op_name == "printf":
+            if call.keywords:
+                raise ParserSyntaxError(
+                    "printf does not accept keyword arguments",
+                    span=call_span,
+                )
+            if len(call.args) < 1:
+                raise ParserSyntaxError(
+                    f"printf requires at least a format string, got {len(call.args)} arguments",
+                    span=call_span,
+                )
+
+            format_node = call.args[0]
+            if not isinstance(format_node, ast.Constant) or not isinstance(format_node.value, str):
+                raise ParserTypeError(
+                    "printf format must be a string literal",
+                    span=self.span_tracker.get_span(format_node),
+                    hint='Use a literal like plm.printf("hello\\n") or plm.printf("x=%d\\n", value)',
+                )
+
+            args = [self.parse_expression(arg) for arg in call.args[1:]]
+            return ir_op.debug.printf_(format_node.value, *args, span=call_span)
+
+        raise InvalidOperationError(
+            f"Unknown debug operation: {op_name}",
+            span=call_span,
+            hint=f"Check if '{op_name}' is a valid debug operation",
+        )
+
     def _parse_ptr_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse pointer operation (ptoas scene: make_tensor, addptr).
 
@@ -2651,11 +2698,14 @@ class ASTParser:
     _MANUAL_AS_BLOCK_OPS: frozenset[str] = frozenset({
         "make_tile",  # allocation — same IR op as SSA
         "l0c_store",    # writes L0C tile to tensor
-        "dump_tile",
     })
 
-    _MANUAL_AS_TENSOR_OPS: frozenset[str] = frozenset({
+    _MANUAL_AS_TENSOR_OPS: frozenset[str] = frozenset({})
+
+    _MANUAL_AS_DEBUG_OPS: frozenset[str] = frozenset({
         "dump_tensor",
+        "dump_tile",
+        "printf",
     })
 
     def _parse_manual_op(self, op_name: str, call: ast.Call) -> ir.Expr:
@@ -2683,6 +2733,8 @@ class ASTParser:
             return self._parse_block_op(op_name, call)
         if op_name in self._MANUAL_AS_TENSOR_OPS:
             return self._parse_tensor_op(op_name, call)
+        if op_name in self._MANUAL_AS_DEBUG_OPS:
+            return self._parse_debug_op(op_name, call)
 
         # Auto-sync: emit forward sync_src/sync_dst before this op
         if self.sync_tracker is not None:
@@ -3192,11 +3244,14 @@ class ASTParser:
     # Maps language-level tensor operation names to IR-level names.
     _TENSOR_OP_NAME_MAP: dict[str, str] = {
         "create_tensor": "create",
-        "dump_tensor": "print_",
     }
 
-    _BLOCK_OP_NAME_MAP: dict[str, str] = {
-        "dump_tile": "print_",
+    _BLOCK_OP_NAME_MAP: dict[str, str] = {}
+
+    _DEBUG_OP_NAME_MAP: dict[str, str] = {
+        "dump_tensor": "dump_tensor_",
+        "dump_tile": "dump_tile_",
+        "printf": "printf_",
     }
 
     # Ops that exist only in one module (no dispatch needed).

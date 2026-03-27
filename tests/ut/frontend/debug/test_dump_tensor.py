@@ -19,18 +19,18 @@ import pypto.language.manual as plm
 
 @fe.kernel
 def dump_tensor_add_kernel(
-    x: pl.Tensor[[32, 16], pl.INT32],
-    y: pl.Tensor[[32, 16], pl.INT32],
-    z: pl.Tensor[[32, 16], pl.INT32],
-) -> pl.Tensor[[32, 16], pl.INT32]:
+    x: pl.Tensor[[128, 64], pl.INT32],
+    y: pl.Tensor[[128, 64], pl.INT32],
+    z: pl.Tensor[[128, 64], pl.INT32],
+) -> pl.Tensor[[128, 64], pl.INT32]:
     tile_type = plm.TileType(
-        shape=[32, 16],
+        shape=[128, 64],
         dtype=pl.INT32,
         target_memory=pl.MemorySpace.Vec,
     )
-    tile_a = plm.make_tile(tile_type, addr=0x0000, size=2048)
-    tile_b = plm.make_tile(tile_type, addr=0x0800, size=2048)
-    tile_c = plm.make_tile(tile_type, addr=0x1000, size=2048)
+    tile_a = plm.make_tile(tile_type, addr=0x0000, size=32768)
+    tile_b = plm.make_tile(tile_type, addr=0x8000, size=32768)
+    tile_c = plm.make_tile(tile_type, addr=0x10000, size=32768)
 
     with pl.section_vector():
         plm.load(tile_a, x, [0, 0])
@@ -53,10 +53,10 @@ def test_dump_tensor():
     compiled_lib = fe.compile(dump_tensor_add_kernel, arch="a3")
     print("compiled lib path:", compiled_lib.lib_path)
 
-    device = "npu:1"
+    device = "npu:0"
     torch.npu.set_device(device)
 
-    x = torch.arange(32 * 16, device=device, dtype=torch.int32).reshape(32, 16)
+    x = torch.arange(128 * 64, device=device, dtype=torch.int32).reshape(128, 64)
     y = x
     z = torch.empty_like(x)
 

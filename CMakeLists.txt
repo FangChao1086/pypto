@@ -113,6 +113,7 @@ set(PYPTO_SOURCES
     src/ir/op/tensor_ops/reduction.cpp
     src/ir/op/tensor_ops/transform.cpp
     src/ir/op/tensor_ops/unary.cpp
+    src/ir/op/debug_ops.cpp
     src/ir/op/ptr_ops.cpp
     src/ir/op/testing.cpp
     src/ir/op/type_inference.cpp

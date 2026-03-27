@@ -237,52 +237,6 @@ def l0c_store(
     )
 
 
-def print_(
-    tile: Expr,
-    offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
-    shapes: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
-    span: Span | None = None,
-) -> Call:
-    """Print a tile or tile window for debugging."""
-    actual_span = _get_span_or_capture(span)
-    if not isinstance(tile.type, TileType):
-        raise TypeError(f"block.print requires TileType input, but got {type(tile.type).__name__}")
-    if (offsets is None) != (shapes is None):
-        raise ValueError("block.print offsets and shapes must be provided together")
-
-    tile_type = tile.type
-    rank = len(tile_type.shape)
-
-    if offsets is None and shapes is None:
-        return _ir_core.create_op_call("block.print", [tile], {}, actual_span)
-
-    offsets_tuple = _to_make_tuple(offsets, actual_span)
-    shapes_tuple = _to_make_tuple(shapes, actual_span)
-    if len(offsets_tuple.elements) != rank or len(shapes_tuple.elements) != rank:
-        raise ValueError(
-            f"block.print offsets/shapes must match tile rank {rank}, got "
-            f"{len(offsets_tuple.elements)} offsets and {len(shapes_tuple.elements)} shapes"
-        )
-
-    for idx, offset_expr in enumerate(offsets_tuple.elements):
-        if not isinstance(offset_expr, ConstInt):
-            raise NotImplementedError(
-                f"block.print currently only supports static offsets, got dynamic offset at axis {idx}"
-            )
-
-    for idx, shape_expr in enumerate(shapes_tuple.elements):
-        if not isinstance(shape_expr, ConstInt):
-            raise NotImplementedError(
-                f"block.print currently only supports static shapes, got dynamic shape at axis {idx}"
-            )
-        if shape_expr.value <= 0:
-            raise ValueError(
-                f"block.print shape at axis {idx} must be positive, got {shape_expr.value}"
-            )
-
-    return _ir_core.create_op_call("block.print", [tile, offsets_tuple, shapes_tuple], {}, actual_span)
-
-
 def move(
     tile: Expr,
     target_memory: MemorySpace,

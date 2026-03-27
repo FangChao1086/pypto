@@ -209,6 +209,177 @@ class TestErrorCases:
                 tile = pl.load(x, offsets=[0, 0], shapes=[16, 16])
                 plm.dump_tile(tile, offsets=[0, 0])
                 return x
+                
+    def test_printf_requires_string_literal_format(self):
+        """printf should reject non-string-literal format arguments."""
+
+        with pytest.raises(ParserTypeError, match="string literal"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def nonliteral_printf(x: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                plm.printf(123, x)  # type: ignore[arg-type]
+                return x
+
+    def test_printf_rejects_mismatched_argument_count(self):
+        """printf should reject placeholder/argument count mismatch."""
+
+        with pytest.raises(ParserSyntaxError, match="expects 2 scalar arguments"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def too_few_printf_args(x: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                plm.printf("a=%d b=%d", x)
+                return x
+
+    def test_printf_rejects_non_scalar_argument(self):
+        """printf should only accept scalar arguments."""
+
+        with pytest.raises(ParserSyntaxError, match="requires ScalarType input"):
+
+            @pl.function
+            def tensor_printf(x: pl.Tensor[[16, 16], pl.INT32]) -> pl.Tensor[[16, 16], pl.INT32]:
+                plm.printf("x=%d", x)  # type: ignore[arg-type]
+                return x
+
+    def test_printf_rejects_unsupported_format(self):
+        """printf should reject unsupported format conversions."""
+
+        with pytest.raises(ParserSyntaxError, match="does not support conversion '%s'"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def unsupported_printf(x: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                plm.printf("x=%s", x)
+                return x
+
+    def test_printf_rejects_literal_percent(self):
+        """printf should reject literal %% in v1."""
+
+        with pytest.raises(ParserSyntaxError, match="does not support literal '%%'"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def percent_printf(x: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                plm.printf("x=%% y=%d", x)
+                return x
+
+    def test_printf_accepts_pure_text_without_conversion(self):
+        """printf should accept pure text with zero scalar arguments."""
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def text_only_printf(x: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+            plm.printf("hello world")
+            return x
+
+        assert text_only_printf is not None
+
+    def test_printf_rejects_pure_text_with_extra_args(self):
+        """printf should still reject pure text when scalar arguments are provided."""
+
+        with pytest.raises(ParserSyntaxError, match="expects 0 scalar arguments, but got 1"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def text_only_printf(x: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                plm.printf("hello world", x)
+                return x
+
+    def test_printf_rejects_length_modifiers(self):
+        """printf v1 should reject length modifiers such as ll/h."""
+
+        with pytest.raises(ParserSyntaxError, match="does not support conversion '%l'"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def long_long_printf(x: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                plm.printf("x=%lld", x)
+                return x
+
+        with pytest.raises(ParserSyntaxError, match="does not support conversion '%h'"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def short_printf(x: pl.Scalar[pl.INT16]) -> pl.Scalar[pl.INT16]:
+                plm.printf("x=%hd", x)
+                return x
+
+    def test_printf_accepts_bool_for_decimal_formats(self):
+        """printf should accept bool scalars for %d/%i/%u."""
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def bool_printf(flag: pl.Scalar[pl.BOOL]) -> pl.Scalar[pl.BOOL]:
+            plm.printf("flag=%d alt=%i uns=%u", flag, flag, flag)
+            return flag
+
+        assert bool_printf is not None
+
+    def test_printf_rejects_bool_for_hex(self):
+        """printf should reject bool scalars for %x."""
+
+        with pytest.raises(ParserSyntaxError, match="requires unsigned integer or index scalar"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def bool_hex_printf(flag: pl.Scalar[pl.BOOL]) -> pl.Scalar[pl.BOOL]:
+                plm.printf("flag=%x", flag)
+                return flag
+
+    def test_printf_accepts_index_argument(self):
+        """printf should accept index scalars for integer formats."""
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def index_printf(idx: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+            plm.printf("idx=%d hex=%x", idx, idx)
+            return idx
+
+        assert index_printf is not None
+
+    def test_printf_rejects_unsigned_for_signed_formats(self):
+        """printf should reject unsigned integers for %d/%i."""
+
+        with pytest.raises(ParserSyntaxError, match="requires signed integer, bool, or index scalar"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def bad_unsigned_decimal(x: pl.Scalar[pl.UINT32]) -> pl.Scalar[pl.UINT32]:
+                plm.printf("x=%d y=%i", x, x)
+                return x
+
+    def test_printf_rejects_signed_for_unsigned_formats(self):
+        """printf should reject signed integers for %u/%x."""
+
+        with pytest.raises(ParserSyntaxError, match="requires unsigned integer, bool, or index scalar"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def bad_signed_unsigned(x: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                plm.printf("x=%u", x)
+                return x
+
+        with pytest.raises(ParserSyntaxError, match="requires unsigned integer or index scalar"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def bad_signed_hex(x: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                plm.printf("x=%x", x)
+                return x
+
+    def test_printf_rejects_non_fp32_for_float(self):
+        """printf should reject FP16/BF16 for %f in v1."""
+
+        with pytest.raises(ParserSyntaxError, match="requires FP32 scalar"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def bad_fp16_float(x: pl.Scalar[pl.FP16]) -> pl.Scalar[pl.FP16]:
+                plm.printf("x=%f", x)
+                return x
+
+        with pytest.raises(ParserSyntaxError, match="requires FP32 scalar"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def bad_bf16_float(x: pl.Scalar[pl.BF16]) -> pl.Scalar[pl.BF16]:
+                plm.printf("x=%f", x)
+                return x
+
+    def test_printf_accepts_common_flags_width_precision(self):
+        """printf should accept common flags, width, and precision syntax."""
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def modifier_printf(x: pl.Scalar[pl.UINT32], y: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
+            plm.printf("x=%#08x y=%+08.3f", x, y)
+            return y
+
+        assert modifier_printf is not None
 
 
 class TestSSAValidation:

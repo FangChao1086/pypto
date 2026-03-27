@@ -61,7 +61,7 @@ def test_dump_tile():
     compiled_lib = fe.compile(dump_tile_add_kernel, arch="a3")
     print("compiled lib path:", compiled_lib.lib_path)
 
-    device = "npu:1"
+    device = "npu:0"
     torch.npu.set_device(device)
 
     x = torch.arange(64 * 32, device=device, dtype=torch.int32).reshape(64, 32)

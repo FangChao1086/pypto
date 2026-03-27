@@ -71,16 +71,24 @@ static std::string DataTypeToMLIRImpl(::pypto::DataType dtype) {
     return "f16";
   } else if (dtype == ::pypto::DataType::BF16) {
     return "bf16";
-  } else if (dtype == ::pypto::DataType::INT32) {
-    return "i32";
-  } else if (dtype == ::pypto::DataType::INDEX) {
-    return "index";
-  } else if (dtype == ::pypto::DataType::INT64) {
-    return "i64";
   } else if (dtype == ::pypto::DataType::INT8) {
     return "i8";
   } else if (dtype == ::pypto::DataType::UINT8) {
     return "ui8";
+  } else if (dtype == ::pypto::DataType::INT16) {
+    return "i16";
+  } else if (dtype == ::pypto::DataType::UINT16) {
+    return "ui16";
+  } else if (dtype == ::pypto::DataType::INT32) {
+    return "i32";
+  } else if (dtype == ::pypto::DataType::UINT32) {
+    return "ui32";
+  } else if (dtype == ::pypto::DataType::INDEX) {
+    return "index";
+  } else if (dtype == ::pypto::DataType::INT64) {
+    return "i64";
+  } else if (dtype == ::pypto::DataType::UINT64) {
+    return "ui64";
   } else if (dtype == ::pypto::DataType::BOOL) {
     return "i1";
   } else {
@@ -601,7 +609,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       VisitExpr(op->value_);
       // Built-in tile-producing ops often write directly to current_result_buf_
       // without producing a separate SSA value in current_expr_value_. Record the
-      // assigned buffer name so later uses like block.print(tile) can resolve it.
+      // assigned buffer name so later uses like debug.dump_tile(tile) can resolve it.
       if (result_tile_type && !current_result_buf_.empty()) {
         var_to_mlir_[op->var_->name_] = current_result_buf_;
       }

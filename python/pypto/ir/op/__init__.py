@@ -14,6 +14,7 @@ This module organizes IR operations by category (e.g., tensor, block, system ope
 """
 
 from . import block_ops as block
+from . import debug_ops as debug
 from . import manual_ops as manual
 from . import system_ops as system
 from . import ptr_ops as ptr
@@ -21,6 +22,7 @@ from . import tensor_ops as tensor
 
 __all__ = [
     "block",
+    "debug",
     "manual",
     "system",
     "tensor",
