@@ -50,12 +50,12 @@ class TestSyncTracker:
         assert pairs == []
 
     def test_same_pipe_sync_enabled(self):
-        """same_pipe_sync=True: V→V RAW emits MTE2→V sync (hardware surrogate on a2/a3)."""
+        """same_pipe_sync=True: V→V RAW emits (V, V) SyncPair; emission uses bar_v."""
         tracker = SyncTracker(same_pipe_sync=True)
         tracker.record_op(PipeType.V, [], ["tile_a"])   # write on V
         pairs = tracker.record_op(PipeType.V, ["tile_a"], [])  # read on V
         assert len(pairs) == 1
-        assert pairs[0].set_pipe == PipeType.MTE2  # surrogate for V→V
+        assert pairs[0].set_pipe == PipeType.V   # kept as V→V; emission layer emits bar_v
         assert pairs[0].wait_pipe == PipeType.V
         assert pairs[0].dep_type == "raw"
 

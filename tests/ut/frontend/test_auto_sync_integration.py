@@ -79,7 +79,7 @@ class TestAutoSyncForward:
         assert "system.sync_src" not in ir_str, f"No sync expected by default:\n{ir_str}"
 
     def test_same_pipe_sync_required_a3(self):
-        """Two V ops on same tile, a3 arch → sync required (V→V needs software sync)."""
+        """Two V ops on same tile, a3 arch → bar_v required (V→V needs software barrier)."""
 
         @fe.kernel(auto_sync=True)
         def k(
@@ -90,15 +90,15 @@ class TestAutoSyncForward:
             tile_b = plm.make_tile(tt, addr=128, size=128)
             tile_c = plm.make_tile(tt, addr=256, size=128)
             plm.add(tile_b, tile_a, tile_a)       # V: writes tile_b
-            plm.neg(tile_c, tile_b)               # V: reads tile_b → needs V→V sync
+            plm.neg(tile_c, tile_b)               # V: reads tile_b → needs bar_v
             return x
 
         ir_str = _ir_to_str(k.parse(npu_arch="a3"))
-        assert "system.sync_src" in ir_str, f"Expected V→V sync on a3:\n{ir_str}"
-        assert "system.sync_dst" in ir_str, f"Expected V→V sync on a3:\n{ir_str}"
+        assert "system.bar_v" in ir_str, f"Expected bar_v on a3:\n{ir_str}"
+        assert "system.sync_src" not in ir_str, f"sync_src must not appear for V→V on a3:\n{ir_str}"
 
     def test_same_pipe_sync_required_dav2201(self):
-        """dav-2201 arch string also triggers same-pipe sync."""
+        """dav-2201 arch string also triggers same-pipe sync via bar_v."""
 
         @fe.kernel(auto_sync=True)
         def k(
@@ -109,11 +109,11 @@ class TestAutoSyncForward:
             tile_b = plm.make_tile(tt, addr=128, size=128)
             tile_c = plm.make_tile(tt, addr=256, size=128)
             plm.add(tile_b, tile_a, tile_a)       # V
-            plm.neg(tile_c, tile_b)               # V → needs sync on dav-2201
+            plm.neg(tile_c, tile_b)               # V → bar_v on dav-2201
             return x
 
         ir_str = _ir_to_str(k.parse(npu_arch="dav-2201"))
-        assert "system.sync_src" in ir_str, f"Expected V→V sync on dav-2201:\n{ir_str}"
+        assert "system.bar_v" in ir_str, f"Expected bar_v on dav-2201:\n{ir_str}"
 
     def test_auto_sync_disabled_no_sync(self):
         """auto_sync=False → no sync ops emitted."""
@@ -183,13 +183,15 @@ class TestAutoSyncForward:
             plm.neg(tile_c, tile_b)
             return x
 
-        # a3: V→V needs sync
+        # a3: V→V needs bar_v barrier
         ir_a3 = _ir_to_str(k.parse(npu_arch="a3"))
-        assert "system.sync_src" in ir_a3
+        assert "system.bar_v" in ir_a3
+        assert "system.sync_src" not in ir_a3
 
-        # a5: V→V does not need sync
+        # a5: V→V does not need any sync
         ir_a5 = _ir_to_str(k.parse(npu_arch="a5"))
         assert "system.sync_src" not in ir_a5
+        assert "system.bar_v" not in ir_a5
 
 
 class TestAutoSyncBackward:

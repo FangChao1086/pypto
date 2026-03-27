@@ -21,8 +21,20 @@ if TYPE_CHECKING:
 
 
 def emit_sync_pair(builder: IRBuilder, pair: SyncPair, span: ir.Span) -> None:
-    """Emit ``sync_src`` + ``sync_dst`` for a forward dependency."""
+    """Emit sync IR for a forward dependency.
+
+    V→V pairs on a2/a3 use ``bar_v`` (vector pipeline barrier) because
+    hardware does not support ``set_flag[V, V]``.  All other cross-pipe
+    pairs emit the standard ``sync_src`` + ``sync_dst`` pair.
+    """
+    from pypto.pypto_core.ir import PipeType
     from pypto.ir.op import system_ops
+
+    if pair.set_pipe == PipeType.V and pair.wait_pipe == PipeType.V:
+        # a2/a3: V pipeline does not guarantee intra-pipe ordering;
+        # bar_v drains all pending V operations at this point.
+        builder.eval_stmt(system_ops.bar_v(span=span), span)
+        return
 
     src_expr = system_ops.sync_src(
         set_pipe=pair.set_pipe, wait_pipe=pair.wait_pipe,

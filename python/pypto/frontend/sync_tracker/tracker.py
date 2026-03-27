@@ -62,17 +62,19 @@ class SyncTracker:
 
     # -- forward sync ------------------------------------------------------
 
-    # On a2/a3, the V pipeline does not guarantee intra-pipe ordering.
-    # Hardware does not support set_flag[V, V] — use MTE2 as a surrogate:
-    # set_flag[MTE2, V] executes immediately (MTE2 idle in vector section),
-    # wait_flag[MTE2, V] forces V to drain its queue up to this point.
-    _V_SURROGATE_PIPE: PipeType = PipeType.MTE2
+    def _make_sync_pair(self, set_pipe: PipeType, wait_pipe: PipeType, dep_type: str) -> SyncPair:
+        """Create a SyncPair with proper event_id.
 
-    def _resolve_same_pipe_v(self, set_pipe: PipeType, wait_pipe: PipeType) -> tuple[PipeType, PipeType]:
-        """Replace V→V sync pair with MTE2→V (hardware constraint on a3)."""
-        if self._same_pipe_sync and set_pipe == wait_pipe == PipeType.V:
-            return (self._V_SURROGATE_PIPE, wait_pipe)
-        return (set_pipe, wait_pipe)
+        V→V pairs on a2/a3 are handled by ``bar_v`` in the emission layer
+        (hardware does not support ``set_flag[V, V]``).  They do not
+        consume a hardware event register, so event_id is left at 0.
+        All other cross-pipe pairs allocate a forward event_id from the
+        per-pipe-pair pool.
+        """
+        if set_pipe == PipeType.V and wait_pipe == PipeType.V:
+            return SyncPair(set_pipe, wait_pipe, dep_type, event_id=0)
+        eid = self._event_allocator.forward_event_id(set_pipe, wait_pipe)
+        return SyncPair(set_pipe, wait_pipe, dep_type, eid)
 
     def record_op(
         self,
@@ -111,19 +113,17 @@ class SyncTracker:
         for name in read_tile_names:
             state = self._buffer_states.get(name)
             if state and state.last_write_pipe is not None and _needs_sync(state.last_write_pipe, state):
-                key = self._resolve_same_pipe_v(state.last_write_pipe, pipe)
+                key = (state.last_write_pipe, pipe)
                 if key not in emitted:
-                    eid = self._event_allocator.forward_event_id(*key)
-                    emitted[key] = SyncPair(*key, "raw", eid)
+                    emitted[key] = self._make_sync_pair(*key, "raw")
 
         # WAW: writing a tile last written on a (possibly same) pipe
         for name in write_tile_names:
             state = self._buffer_states.get(name)
             if state and state.last_write_pipe is not None and _needs_sync(state.last_write_pipe, state):
-                key = self._resolve_same_pipe_v(state.last_write_pipe, pipe)
+                key = (state.last_write_pipe, pipe)
                 if key not in emitted:
-                    eid = self._event_allocator.forward_event_id(*key)
-                    emitted[key] = SyncPair(*key, "waw", eid)
+                    emitted[key] = self._make_sync_pair(*key, "waw")
 
         # WAR: writing a tile last read on a (possibly same) pipe
         for name in write_tile_names:
@@ -131,10 +131,9 @@ class SyncTracker:
             if state:
                 for read_pipe in state.last_read_pipes:
                     if read_pipe != pipe or (self._same_pipe_sync and pipe == PipeType.V):
-                        key = self._resolve_same_pipe_v(read_pipe, pipe)
+                        key = (read_pipe, pipe)
                         if key not in emitted:
-                            eid = self._event_allocator.forward_event_id(*key)
-                            emitted[key] = SyncPair(*key, "war", eid)
+                            emitted[key] = self._make_sync_pair(*key, "war")
 
         # Address-overlap: check tiles with different names but overlapping memory
         self._check_overlap_deps(pipe, read_tile_names, write_tile_names, emitted)
@@ -194,10 +193,9 @@ class SyncTracker:
                 if other_region is None:
                     continue
                 if read_region.overlaps(other_region):
-                    key = self._resolve_same_pipe_v(other_state.last_write_pipe, pipe)
+                    key = (other_state.last_write_pipe, pipe)
                     if key not in emitted:
-                        eid = self._event_allocator.forward_event_id(*key)
-                        emitted[key] = SyncPair(*key, "raw_overlap", eid)
+                        emitted[key] = self._make_sync_pair(*key, "raw_overlap")
 
         # WAW overlap
         for write_name in write_tile_names:
@@ -213,10 +211,9 @@ class SyncTracker:
                 if other_region is None:
                     continue
                 if write_region.overlaps(other_region):
-                    key = self._resolve_same_pipe_v(other_state.last_write_pipe, pipe)
+                    key = (other_state.last_write_pipe, pipe)
                     if key not in emitted:
-                        eid = self._event_allocator.forward_event_id(*key)
-                        emitted[key] = SyncPair(*key, "waw_overlap", eid)
+                        emitted[key] = self._make_sync_pair(*key, "waw_overlap")
 
         # WAR overlap
         for write_name in write_tile_names:
@@ -233,10 +230,9 @@ class SyncTracker:
                     continue
                 for read_pipe in other_state.last_read_pipes:
                     if _needs_sync(read_pipe):
-                        key = self._resolve_same_pipe_v(read_pipe, pipe)
+                        key = (read_pipe, pipe)
                         if key not in emitted:
-                            eid = self._event_allocator.forward_event_id(*key)
-                            emitted[key] = SyncPair(*key, "war_overlap", eid)
+                            emitted[key] = self._make_sync_pair(*key, "war_overlap")
 
     # -- pipeline fence (cross-core sync) -----------------------------------
 
