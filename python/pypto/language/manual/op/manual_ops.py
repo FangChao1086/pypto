@@ -82,10 +82,13 @@ class TileType:
 # {MemorySpace: (blayout, slayout)}
 _REQUIRED_LAYOUTS: dict[MemorySpace, tuple[int, int]] = {
     MemorySpace.Mat:   (2, 1),  # NZ format: col_major block, row_major scatter (default)
-    MemorySpace.Left:  (1, 1),  # row_major block, row_major scatter
+    MemorySpace.Left:  (1, 1),  # row_major block, row_major scatter (a3/a2); a5 also supports (2, 1)
     MemorySpace.Right: (1, 2),  # row_major block, col_major scatter
     MemorySpace.Acc:   (2, 1),  # NZ format: col_major block, row_major scatter
 }
+
+# a5 Left also supports col_major block layout
+_LEFT_A5_LAYOUT: tuple[int, int] = (2, 1)
 
 # MAT also supports DN layout (row_major block, col_major scatter) for DN TLOAD.
 _MAT_DN_LAYOUT: tuple[int, int] = (1, 2)
@@ -118,15 +121,23 @@ def _apply_default_layout(tt: "TileType") -> None:
                 f"{_MAT_DN_LAYOUT} (DN), got ({tt.blayout}, {tt.slayout})"
             )
     else:
-        if tt.blayout != req_b:
-            raise ValueError(
-                f"{space_name} tiles require blayout={req_b} ({_LAYOUT_NAMES[req_b]}), "
-                f"got blayout={tt.blayout} ({_LAYOUT_NAMES.get(tt.blayout, '?')})"
-            )
-        if tt.slayout != req_s:
-            raise ValueError(
-                f"{space_name} tiles require slayout={req_s} ({_LAYOUT_NAMES[req_s]}), "
-                f"got slayout={tt.slayout} ({_LAYOUT_NAMES.get(tt.slayout, '?')})"
+        if tt.target_memory == MemorySpace.Left:
+            # Left supports (1,1) on a3/a2 and (2,1) on a5
+            if actual != required and actual != _LEFT_A5_LAYOUT:
+                raise ValueError(
+                    f"{space_name} tiles require blayout/slayout={required} (a3/a2) or "
+                    f"{_LEFT_A5_LAYOUT} (a5), got ({tt.blayout}, {tt.slayout})"
+                )
+        else:
+            if tt.blayout != req_b:
+                raise ValueError(
+                    f"{space_name} tiles require blayout={req_b} ({_LAYOUT_NAMES[req_b]}), "
+                    f"got blayout={tt.blayout} ({_LAYOUT_NAMES.get(tt.blayout, '?')})"
+                )
+            if tt.slayout != req_s:
+                raise ValueError(
+                    f"{space_name} tiles require slayout={req_s} ({_LAYOUT_NAMES[req_s]}), "
+                    f"got slayout={tt.slayout} ({_LAYOUT_NAMES.get(tt.slayout, '?')})"
             )
 
     # Auto-fill fractal for FP32 ACC
@@ -326,7 +337,11 @@ def l0c_store(
     return Tensor(expr=_ir_block_ops.l0c_store(tile.unwrap(), offsets, shapes, output_tensor.unwrap()))
 
 
-def move(out: Tile, tile: Tile) -> None:
+def move(
+    out: Tile,
+    tile: Tile,
+    acc_to_vec_mode: Literal["single_vec0", "single_vec1", "dual_split_m", "dual_split_n"] | None = None,
+) -> None:
     """Move a tile between memory levels, writing into a pre-allocated buffer.
 
     The TMOV variant (M2L, M2B, etc.) is determined by the output tile's
@@ -335,8 +350,16 @@ def move(out: Tile, tile: Tile) -> None:
     Args:
         out: Pre-allocated output tile; rebound on return.
         tile: Source tile.
+        acc_to_vec_mode: AccToVecMode for Acc→Vec transfers (optional).
+            - "single_vec0": SingleModeVec0 (default)
+            - "single_vec1": SingleModeVec1
+            - "dual_split_m": DualModeSplitM
+            - "dual_split_n": DualModeSplitN
     """
-    _op("manual.move", [tile.unwrap()], out)
+    kwargs = {}
+    if acc_to_vec_mode is not None:
+        kwargs["acc_to_vec_mode"] = acc_to_vec_mode
+    _op("manual.move", [tile.unwrap()], out, **kwargs)
 
 
 def ub_copy(tile: Tile, out: Tile) -> None:

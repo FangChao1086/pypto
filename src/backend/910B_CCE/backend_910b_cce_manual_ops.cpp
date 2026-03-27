@@ -221,7 +221,27 @@ static std::string MakeManualMoveCodegenCCE(const ir::CallPtr& op, codegen::Code
   CHECK(op->args_.size() == 2) << "manual.move: expected 2 args (src, dst), got " << op->args_.size();
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string dst = codegen.GetExprAsCode(op->args_[1]);
-  codegen.Emit("TMOV(" + dst + ", " + src + ");");
+
+  // Check for acc_to_vec_mode kwarg
+  if (op->HasKwarg("acc_to_vec_mode")) {
+    const std::string& mode_str = op->GetKwarg<std::string>("acc_to_vec_mode");
+    std::string mode_enum;
+    if (mode_str == "single_vec0") {
+      mode_enum = "AccToVecMode::SingleModeVec0";
+    } else if (mode_str == "single_vec1") {
+      mode_enum = "AccToVecMode::SingleModeVec1";
+    } else if (mode_str == "dual_split_m") {
+      mode_enum = "AccToVecMode::DualModeSplitM";
+    } else if (mode_str == "dual_split_n") {
+      mode_enum = "AccToVecMode::DualModeSplitN";
+    } else {
+      throw pypto::ValueError("Invalid acc_to_vec_mode: " + mode_str);
+    }
+    // Generate TMOV with explicit template parameters: <DstType, SrcType, AccToVecMode>
+    codegen.Emit("TMOV<decltype(" + dst + "), decltype(" + src + "), " + mode_enum + ">(" + dst + ", " + src + ");");
+  } else {
+    codegen.Emit("TMOV(" + dst + ", " + src + ");");
+  }
   return "";
 }
 

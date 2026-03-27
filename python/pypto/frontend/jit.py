@@ -505,11 +505,12 @@ def _build_bisheng_flags(toolkit_home: str, arch: str, cpp_content: str, has_cro
     else:
         npu_arch = "dav-c220" if arch in ("a2", "a3") else "dav-c310"
 
+    mem_arch = "-DMEMORY_BASE" if arch in ("a2", "a3") else "-DREGISTER_BASE"
     common = [
         "-fPIC",
         "-shared",
         "-xcce",
-        "-DMEMORY_BASE",
+        f"{mem_arch}",
         "-O2",
         "-std=c++17",
         f"-I{toolkit_home}/include",
@@ -568,7 +569,7 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3", enable_print_deb
         backend.set_backend_type(BackendType.CCE)
 
         cce_codegen = CCECodegen()
-        cpp_code = cce_codegen.generate_single(prog)
+        cpp_code = cce_codegen.generate_single(prog, arch)
         Path(raw_cpp_path).write_text(cpp_code, encoding="utf-8")
 
         # Parse kernel signature from generated C++
@@ -590,8 +591,10 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3", enable_print_deb
             raise RuntimeError("Could not find kernel name in CCE-generated C++ code")
 
         # Detect cross-core sync from generated code
-        has_cross_sync = "set_ffts_base_addr" in content
-        if has_cross_sync:
+        # a5 uses cross_core_set_flag (no ffts), a3 uses ffts_cross_core_sync
+        has_ffts = "set_ffts_base_addr" in content
+        has_cross_sync = has_ffts or "set_intra_block" in content
+        if has_ffts:
             # Remove the ffts_addr param from kernel_params (last param)
             kernel_params = kernel_params[:-1]
 
@@ -600,7 +603,7 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3", enable_print_deb
             kernel_params=kernel_params,
             kernel_cpp_name="kernel.cpp",
             kernel_name=kernel_name,
-            has_cross_core_sync=has_cross_sync,
+            has_cross_core_sync=has_ffts,
         )
         Path(final_kernel).write_text(caller_content, encoding="utf-8")
     else:

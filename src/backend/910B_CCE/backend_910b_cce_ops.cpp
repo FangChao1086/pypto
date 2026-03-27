@@ -869,14 +869,27 @@ static std::string MakeCrossCoreSetCodegenCCE(const ir::CallPtr& op, codegen::Co
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
   auto pipe = op->GetKwarg<int>("pipe");
   std::string pipe_str = PipeTypeToCCEString(static_cast<ir::PipeType>(pipe));
-  if (is_dynamic) {
-    // Dynamic event_id: pass runtime value directly to getFFTSMsg.
-    std::string event_id = codegen.GetExprAsCode(op->args_[0]);
-    codegen.Emit("ffts_cross_core_sync(" + pipe_str + ", getFFTSMsg(FFTS_MODE_VAL, " + event_id + "));");
+  bool is_a5 = (codegen.GetArch() == "a5");
+  if (is_a5) {
+    // a5: use set_intra_block (called twice: id and id+16)
+    if (is_dynamic) {
+      std::string event_id = codegen.GetExprAsCode(op->args_[0]);
+      codegen.Emit("set_intra_block(" + pipe_str + ", " + event_id + ");");
+      codegen.Emit("set_intra_block(" + pipe_str + ", " + event_id + " + 16);");
+    } else {
+      int event_id = op->GetKwarg<int>("event_id");
+      codegen.Emit("set_intra_block(" + pipe_str + ", " + std::to_string(event_id) + ");");
+      codegen.Emit("set_intra_block(" + pipe_str + ", " + std::to_string(event_id + 16) + ");");
+    }
   } else {
-    int event_id = op->GetKwarg<int>("event_id");
-    codegen.Emit("ffts_cross_core_sync(" + pipe_str + ", getFFTSMsg(FFTS_MODE_VAL, " +
-                  std::to_string(event_id) + "));");
+    if (is_dynamic) {
+      std::string event_id = codegen.GetExprAsCode(op->args_[0]);
+      codegen.Emit("ffts_cross_core_sync(" + pipe_str + ", getFFTSMsg(FFTS_MODE_VAL, " + event_id + "));");
+    } else {
+      int event_id = op->GetKwarg<int>("event_id");
+      codegen.Emit("ffts_cross_core_sync(" + pipe_str + ", getFFTSMsg(FFTS_MODE_VAL, " +
+                    std::to_string(event_id) + "));");
+    }
   }
   return "";
 }
@@ -884,13 +897,26 @@ static std::string MakeCrossCoreSetCodegenCCE(const ir::CallPtr& op, codegen::Co
 static std::string MakeCrossCoreWaitCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base,
                                                 bool is_dynamic) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  if (is_dynamic) {
-    // Dynamic event_id: pass runtime value directly to wait_flag_dev.
-    std::string event_id = codegen.GetExprAsCode(op->args_[0]);
-    codegen.Emit("wait_flag_dev(" + event_id + ");");
+  auto pipe = op->GetKwarg<int>("pipe");
+  std::string pipe_str = PipeTypeToCCEString(static_cast<ir::PipeType>(pipe));
+  bool is_a5 = (codegen.GetArch() == "a5");
+  if (is_a5) {
+    // a5: use wait_intra_block
+    if (is_dynamic) {
+      std::string event_id = codegen.GetExprAsCode(op->args_[0]);
+      codegen.Emit("wait_intra_block(" + pipe_str + ", " + event_id + ");");
+    } else {
+      int event_id = op->GetKwarg<int>("event_id");
+      codegen.Emit("wait_intra_block(" + pipe_str + ", " + std::to_string(event_id) + ");");
+    }
   } else {
-    int event_id = op->GetKwarg<int>("event_id");
-    codegen.Emit("wait_flag_dev(" + std::to_string(event_id) + ");");
+    if (is_dynamic) {
+      std::string event_id = codegen.GetExprAsCode(op->args_[0]);
+      codegen.Emit("wait_flag_dev(" + event_id + ");");
+    } else {
+      int event_id = op->GetKwarg<int>("event_id");
+      codegen.Emit("wait_flag_dev(" + std::to_string(event_id) + ");");
+    }
   }
   return "";
 }

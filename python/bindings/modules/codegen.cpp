@@ -96,8 +96,10 @@ void BindCodegen(nb::module_& m) {
           "orchestration/<func_name>.cpp.")
       .def(
           "generate_single",
-          [](CCECodegen& self, const ProgramPtr& program) { return self.GenerateSingle(program); },
-          nb::arg("program"),
+          [](CCECodegen& self, const ProgramPtr& program, const std::string& arch) {
+            return self.GenerateSingle(program, arch);
+          },
+          nb::arg("program"), nb::arg("arch") = "a3",
           "Generate a single C++ file from a PyPTO IR Program (MIX mode). "
           "Runs IR passes, generates __global__ AICORE kernel with section guards, "
           "constexpr scalars, and FFTS support. Returns C++ code as a single string.");

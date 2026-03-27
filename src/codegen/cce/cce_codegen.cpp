@@ -179,8 +179,11 @@ std::string CCECodegen::GenerateFunction(const ir::FunctionPtr& func) {
 // Single-file MIX mode generation (skip ptoas)
 // ============================================================================
 
-std::string CCECodegen::GenerateSingle(const ir::ProgramPtr& program) {
+std::string CCECodegen::GenerateSingle(const ir::ProgramPtr& program, const std::string& arch) {
   CHECK(program != nullptr) << "Cannot generate code for null program";
+
+  // Store arch for use in prologue generation
+  arch_ = arch;
 
   // Run IR passes (same as PTOCodegen::Generate)
   ir::ProgramPtr lowered = ir::pass::LowerBreakContinue()(program);
@@ -202,14 +205,15 @@ std::string CCECodegen::GenerateSingle(const ir::ProgramPtr& program) {
   context_.Clear();
   single_file_mode_ = true;
 
-  // Detect cross-core sync
+  // Detect cross-core sync (a5 uses hardware sync, not ffts)
   bool has_cross_sync = DetectCrossCoreSyncOps(kernel_func->body_);
+  bool needs_ffts = has_cross_sync && (arch_ != "a5");
 
   // Emit header (single-file mode: no tensor.h)
   emitter_.EmitLine(KERNEL_HEADER_SINGLE);
 
   // Generate prologue and body
-  GenerateSinglePrologue(kernel_func, has_cross_sync);
+  GenerateSinglePrologue(kernel_func, needs_ffts);
   GenerateBody(kernel_func);
 
   single_file_mode_ = false;
@@ -292,6 +296,46 @@ class TileUsageCollector : public ir::IRVisitor {
       for (const auto& elem : mt->elements_) {
         CollectTileNames(elem, false);
       }
+    }
+  }
+};
+
+/**
+ * @brief Collect which sections each tile variable is USED in (as Call operand).
+ *
+ * A tile used in both Cube and Vec sections (e.g., written by CUBE, read by VEC)
+ * should be declared as shared (outside any #if guard).
+ */
+class TileUsageSectionCollector : public ir::IRVisitor {
+ public:
+  std::map<std::string, std::set<ir::SectionKind>> tile_usage_sections_;
+  std::optional<ir::SectionKind> current_section_;
+
+  void VisitStmt_(const ir::SectionStmtPtr& op) override {
+    auto prev = current_section_;
+    current_section_ = op->section_kind_;
+    ir::IRVisitor::VisitStmt_(op);
+    current_section_ = prev;
+  }
+
+  void VisitExpr_(const ir::CallPtr& op) override {
+    if (current_section_.has_value()) {
+      for (const auto& arg : op->args_) {
+        CollectTileVarNames(arg);
+      }
+    }
+    ir::IRVisitor::VisitExpr_(op);
+  }
+
+ private:
+  void CollectTileVarNames(const ir::ExprPtr& expr) {
+    if (!expr) return;
+    if (auto var = ir::As<ir::Var>(expr)) {
+      if (ir::As<ir::TileType>(var->GetType())) {
+        tile_usage_sections_[var->name_].insert(*current_section_);
+      }
+    } else if (auto tge = ir::As<ir::TupleGetItemExpr>(expr)) {
+      CollectTileVarNames(tge->tuple_);
     }
   }
 };
@@ -422,6 +466,13 @@ void CCECodegen::GenerateSinglePrologue(const ir::FunctionPtr& func, bool has_cr
   // Collect tile sections for section-aware declarations
   auto tile_sections = CollectTileSections(func->body_);
 
+  // Collect which sections each tile is used in (for cross-section detection)
+  TileUsageSectionCollector usage_section_collector;
+  if (func->body_) {
+    usage_section_collector.VisitStmt(func->body_);
+  }
+  const auto& tile_usage_sections = usage_section_collector.tile_usage_sections_;
+
   // Collect all TileType variables and filter out unused ones
   std::vector<std::pair<ir::VarPtr, ir::TileTypePtr>> tile_vars;
   if (func->body_) {
@@ -495,6 +546,13 @@ void CCECodegen::GenerateSinglePrologue(const ir::FunctionPtr& func, bool has_cr
     std::vector<std::pair<ir::VarPtr, ir::TileTypePtr>> shared_tiles;
 
     for (const auto& [var, tile_type] : tile_vars) {
+      // Check if tile is used across multiple sections → shared
+      auto usage_it = tile_usage_sections.find(var->name_);
+      if (usage_it != tile_usage_sections.end() && usage_it->second.size() > 1) {
+        shared_tiles.emplace_back(var, tile_type);
+        continue;
+      }
+
       auto it = tile_sections.find(var);
       if (it != tile_sections.end()) {
         if (it->second == ir::SectionKind::Cube) {
@@ -2062,7 +2120,7 @@ void CCECodegen::GenerateGlobalTensorTypeDeclaration(
   std::string stride_type;
   if (single_file_mode_) {
     std::ostringstream oss;
-    oss << "Stride<";
+    oss << "pto::Stride<";
     const size_t target_dims = 5;
     size_t n = shape_dims.size();
 

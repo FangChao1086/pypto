@@ -165,7 +165,7 @@ std::string TypeConverter::GenerateShapeType(const std::vector<int64_t>& dims) c
   CHECK(!dims.empty()) << "Cannot generate Shape type for empty dimensions";
 
   std::ostringstream oss;
-  oss << "Shape<";
+  oss << "pto::Shape<";
 
   // Pad to 5 dimensions with leading 1s
   const size_t target_dims = 5;
@@ -193,7 +193,7 @@ std::string TypeConverter::GenerateStrideType(const std::vector<int64_t>& shape)
   CHECK(!shape.empty()) << "Cannot generate Stride type for empty shape";
 
   std::ostringstream oss;
-  oss << "Stride<";
+  oss << "pto::Stride<";
 
   // Pad to 5 dimensions with leading 1s
   const size_t target_dims = 5;

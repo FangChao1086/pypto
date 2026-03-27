@@ -77,7 +77,8 @@ class CCECodegen : public CodegenBase {
    * @param program The IR Program to generate code for
    * @return Generated C++ code as a single string
    */
-  [[nodiscard]] std::string GenerateSingle(const ir::ProgramPtr& program);
+  [[nodiscard]] std::string GenerateSingle(const ir::ProgramPtr& program,
+                                            const std::string& arch = "a3");
 
   // CodegenBase interface (unified API for operator codegen callbacks)
   [[nodiscard]] std::string GetCurrentResultTarget() const override { return current_target_var_; }
@@ -91,6 +92,9 @@ class CCECodegen : public CodegenBase {
 
   /** @brief Check if currently generating in single-file MIX mode */
   bool IsSingleFileMode() const { return single_file_mode_; }
+
+  /** @brief Get the target architecture */
+  const std::string& GetArch() const { return arch_; }
 
   /**
    * @brief Compute offset from IR tensor shape (for single-file mode without Tensor struct)
@@ -348,6 +352,7 @@ class CCECodegen : public CodegenBase {
   TypeConverter type_converter_;     ///< Type converter
   const backend::Backend* backend_;  ///< CCE backend instance (for op info, core type, orchestration)
   bool single_file_mode_ = false;    ///< Whether generating in single-file MIX mode
+  std::string arch_ = "a3";          ///< Target architecture ("a2", "a3", "a5")
   bool force_dn_layout_ = false;     ///< Temporary flag for DN layout in GenerateGlobalTensorTypeDeclaration
   std::set<std::string> dn_tensors_;  ///< Tensor names loaded with layout="dn" (need Layout::DN)
   std::map<std::string, std::string> tile_addresses_;  ///< tile_name → TASSIGN address expression
