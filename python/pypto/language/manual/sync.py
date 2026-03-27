@@ -14,7 +14,7 @@ sync management, supporting inner core sync and cross-core sync with
 forward and bidirectional modes.
 """
 
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from pypto.pypto_core import ir as _ir_core
 
@@ -180,19 +180,41 @@ def wait_data_ready(event_id: int):
     _sync_op(SyncType.CROSS_CORE_SYNC_BOTH, event_id, direction="allocate")
 
 
+def _extract_int_value(value: Any) -> int:
+    """Extract integer value from Python int or ir.Expr.ConstInt.
+    
+    Args:
+        value: Python int or ir.Expr
+        
+    Returns:
+        Integer value
+        
+    Raises:
+        TypeError: If value cannot be converted to int
+    """
+    if isinstance(value, int):
+        return value
+    elif hasattr(value, '__class__') and value.__class__.__name__ == 'ConstInt':
+        return value.value
+    else:
+        raise TypeError(f"event_id must be int or ConstInt, got {type(value).__name__}")
+
+
 def _sync_op(sync_type: SyncType, event_id: int = 0, 
             direction: Optional[str] = None, pipeline: Optional[str] = None):
     """Internal sync operation that generates pto.sync MLIR.
     
     Args:
         sync_type: Type of synchronization
-        event_id: Event identifier
+        event_id: Event identifier (int or ir.Expr.ConstInt)
         direction: Optional direction ("allocate" or "record")
         pipeline: Optional pipeline type for fine-grained sync
     """
+    event_id_value = _extract_int_value(event_id)
+    
     kwargs = {
         "sync_type": sync_type.value,
-        "event_id": event_id,
+        "event_id": event_id_value,
     }
     if direction is not None:
         kwargs["direction"] = direction
