@@ -63,10 +63,6 @@ def test_double_buffer_kernel(
         tile_type = plm.TileType(shape=[64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec)
         policy = plm.BuffersPolicyDB(tile_type, MemorySpace.Vec, SyncType.INNER_CORE_SYNC)
         
-        # Output buffer for storing results
-        out_tile_type = plm.TileType(shape=[256, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec)
-        output_buffer = plm.make_tile(out_tile_type, addr=0x40000, size=32768)
-        
         # Multiple iterations to test ping-pong rotation
         for i in pl.range(4):
             # Get next buffer (automatic ping-pong swap)
@@ -84,10 +80,10 @@ def test_double_buffer_kernel(
             # Sync Vector pipeline (compute completion)
             policy.sync_inner("PIPE_V")
             
-            # Store result
-            plm.store(buf, [i * 64, 0], [64, 128], out=output_buffer)
+            # Store result to output tensor b
+            plm.store(buf, [i * 64, 0], [64, 128], out=b)
     
-    return output_buffer
+    return b
 
 
 def test_double_buffer_policy():
