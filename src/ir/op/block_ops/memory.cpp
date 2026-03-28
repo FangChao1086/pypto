@@ -485,17 +485,6 @@ REGISTER_OP("block.full")
       return DeduceBlockFullType(args, kwargs, "block.full");
     });
 
-REGISTER_OP("block.print")
-    .set_op_category("BlockOp")
-    .set_description("Print a tile or tile window for debugging")
-    .add_argument("tile", "Input tile (TileType)")
-    .add_argument("offsets", "Optional static offsets per dimension (MakeTuple of ConstInt)")
-    .add_argument("shapes", "Optional static shape per dimension (MakeTuple of ConstInt)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockPrintType(args, kwargs, "block.print");
-    });
-
 TypePtr DeduceBlockGetValType(const std::vector<ExprPtr>& args,
                                    const std::vector<std::pair<std::string, std::any>>& kwargs) {
   // block.getval: Read a scalar value from a tile at flattened index
