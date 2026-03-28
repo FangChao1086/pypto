@@ -516,7 +516,7 @@ def test_flashattention_complete_kernel(
                 ub_qk = ub_policy_cube.get()
                 
                 # Move L0C to UB
-                plm.move(l0c_qk, pl.MemorySpace.Mat, out=ub_qk)
+                plm.move(ub_qk, l0c_qk)
                 
                 # 通知 AIV 数据已就绪 (record)
                 ub_policy_cube.record_data_ready(1)
@@ -539,8 +539,8 @@ def test_flashattention_complete_kernel(
                 ub_qk = ub_policy_cube.get()
                 
                 # Move L0C to UB
-                plm.move(l0c_qk, pl.MemorySpace.Mat, out=ub_qk)
-                
+                plm.move(ub_qk, l0c_qk)
+
                 # 通知 AIV 数据已就绪 (record)
                 ub_policy_cube.record_data_ready(3)
     
@@ -803,7 +803,7 @@ def test_multilevel_buffer_kernel(
         plm.matmul(l1_q, l1_k, out=l0c_qk)
         
         # Move L0C to UB
-        plm.move(l0c_qk, pl.MemorySpace.Vec, out=ub_qk)
+        plm.move(ub_qk, l0c_qk)
         
         # Store UB result to output tensor
         plm.store(ub_qk, [0, 0], [64, 64], out=o)
