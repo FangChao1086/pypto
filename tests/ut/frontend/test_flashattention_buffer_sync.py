@@ -133,6 +133,7 @@ def test_double_buffer_policy():
 def test_triple_buffer_kernel(
     p: pl.Tensor[[192, 128], pl.FP16],  # P 矩阵（来自 Vector 的 softmax）
     v: pl.Tensor[[128, 64], pl.FP16],  # V 矩阵（Value）
+    output: pl.Tensor[[192, 64], pl.FP16],  # 输出 Tensor（存储 BMM2 结果）
 ) -> pl.Tensor[[192, 64], pl.FP16]:
     """Test triple buffer policy with cross-core synchronization (CROSS_CORE_SYNC_FORWARD).
     
@@ -166,9 +167,7 @@ def test_triple_buffer_kernel(
         base_addr=0x0  # 相同的物理基地址！
     )
     
-    # 输出缓冲区（存储 BMM2 结果）
-    out_tile_type = plm.TileType(shape=[192, 64], dtype=pl.FP16, target_memory=pl.MemorySpace.Mat)
-    output_buffer = plm.make_tile(out_tile_type, addr=0x40000, size=24576)
+    # 输出 Tensor 由函数参数提供，无需创建 Tile 缓冲区
     
     # ========== Vector 核心操作（生产者）==========
     with pl.section_vector():
@@ -206,9 +205,9 @@ def test_triple_buffer_kernel(
             plm.matmul(l1_buf, v_buffer, out=l0c_buffer)
             
             # 存储结果
-            plm.store(l0c_buffer, [i * 64, 0], [64, 64], out=output_buffer)
+            plm.store(l0c_buffer, [i * 64, 0], [64, 64], out=output)
     
-    return output_buffer
+    return output
 
 
 def test_triple_buffer_policy():
