@@ -128,7 +128,7 @@ class ExprEvaluator:
         # Handle Enum types (e.g., MemorySpace.Vec, SyncType.INNER_CORE_SYNC)
         from enum import Enum as PyEnum
         if isinstance(value, PyEnum):
-            return self.python_value_to_ir(value.value, span)
+            return value  # 返回枚举对象本身，而不是其值
         
         # bool before int because isinstance(True, int) is True
         if isinstance(value, bool):

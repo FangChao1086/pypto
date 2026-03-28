@@ -3112,7 +3112,7 @@ class ASTParser:
                 return ir.ConstInt(_MEMORY_SPACE_MAP[field_name].value, DataType.INT64, span)
             # Check for SyncType.* attribute access
             if obj_name == "SyncType" and field_name in _SYNC_TYPE_MAP:
-                return _SYNC_TYPE_MAP[field_name].value  # 直接返回字符串值
+                return _SYNC_TYPE_MAP[field_name]  # 返回枚举对象
         # Check for nested attribute access like pl.MemorySpace.Left
         if isinstance(attr.value, ast.Attribute):
             inner_attr = attr.value
@@ -3126,12 +3126,13 @@ class ASTParser:
                         return ir.ConstInt(_MEMORY_SPACE_MAP[outer_field_name].value, DataType.INT64, span)
                 # Handle SyncType.INNER_CORE_SYNC, etc.
                 if inner_obj_name == "SyncType" and outer_field_name in _SYNC_TYPE_MAP:
-                    return _SYNC_TYPE_MAP[outer_field_name].value  # 直接返回字符串值
+                    return _SYNC_TYPE_MAP[outer_field_name]  # 返回枚举对象
         
         try:
             python_value = self.expr_evaluator.eval_expr(attr)
-            # 如果是字符串，直接返回（用于 SyncType 等枚举）
-            if isinstance(python_value, str):
+            # 如果是 SyncType 枚举对象，直接返回
+            from pypto.language.manual.buffer_policy import SyncType
+            if isinstance(python_value, SyncType):
                 return python_value
             return self.expr_evaluator.python_value_to_ir(python_value, span)
         except ParserTypeError:

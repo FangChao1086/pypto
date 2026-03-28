@@ -81,7 +81,7 @@ def test_double_buffer_kernel(
             policy.sync_inner("PIPE_V")
             
             # Store result to output tensor b
-            plm.store(buf, [i * 64, 0], [64, 128], out=b)
+            plm.store(b, buf, [i * 64, 0], [64, 128])
     
     return b
 
@@ -205,7 +205,7 @@ def test_triple_buffer_kernel(
             plm.matmul(l1_buf, v_buffer, out=l0c_buffer)
             
             # 存储结果
-            plm.store(l0c_buffer, [i * 64, 0], [64, 64], out=output)
+            plm.store(output, l0c_buffer, [i * 64, 0], [64, 64])
     
     return output
 
@@ -562,7 +562,7 @@ def test_flashattention_complete_kernel(
                 plm.exp(ub_qk, out=ub_qk)
                 
                 # Store结果到输出buffer
-                plm.store(ub_qk, [0, 0, 0, 0], [64, 64], out=output_buffer)
+                plm.store(output_buffer, ub_qk, [0, 0, 0, 0], [64, 64])
                 
                 # 释放 buffer (free)
                 ub_policy_vec.free_buffer(0)
@@ -576,7 +576,7 @@ def test_flashattention_complete_kernel(
                 plm.exp(ub_qk, out=ub_qk)
                 
                 # Store结果到输出buffer
-                plm.store(ub_qk, [0, 0, 0, 64], [64, 64], out=output_buffer)
+                plm.store(output_buffer, ub_qk, [0, 0, 0, 64], [64, 64])
                 
                 # 释放 buffer (free)
                 ub_policy_vec.free_buffer(2)
@@ -806,7 +806,7 @@ def test_multilevel_buffer_kernel(
         plm.move(ub_qk, l0c_qk)
         
         # Store UB result to output tensor
-        plm.store(ub_qk, [0, 0], [64, 64], out=o)
+        plm.store(o, ub_qk, [0, 0], [64, 64])
     
     return o
 
