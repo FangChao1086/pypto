@@ -496,19 +496,21 @@ def test_flashattention_complete_kernel(
         
         # 循环两轮
         for round_idx in pl.range(2):
-            # 使用配对的 event_id
-            event_id_free = round_idx * 2        # 用于 allocate/free
-            event_id_record = round_idx * 2 + 1  # 用于 record/wait
-            
             # 动态选择 buffer
             if round_idx == 0:
                 q_buf = q_buf0
                 k_buf = k_buf0
                 l0c_qk = l0c_qk0
+                # 使用配对的 event_id
+                event_id_free = 0
+                event_id_record = 1
             else:
                 q_buf = q_buf1
                 k_buf = k_buf1
                 l0c_qk = l0c_qk1
+                # 使用配对的 event_id
+                event_id_free = 2
+                event_id_record = 3
             
             # 等待 AIV 释放 buffer (allocate)
             ub_policy_cube.allocate_buffer(event_id_free)
@@ -536,11 +538,16 @@ def test_flashattention_complete_kernel(
         
         # 循环两轮
         for round_idx in pl.range(2):
-            # 使用配对的 event_id（与 AIC 对应）
-            event_id_free = round_idx * 2        # 用于 free
-            event_id_record = round_idx * 2 + 1  # 用于 wait
-            
             # 等待 AIC 数据就绪 (wait)
+            if round_idx == 0:
+                event_id_record = 1
+                event_id_free = 0
+                plm.store(ub_qk, [0, 0, 0, 0], [64, 64], out=output_buffer)
+            else:
+                event_id_record = 3
+                event_id_free = 2
+                plm.store(ub_qk, [0, 0, 0, 64], [64, 64], out=output_buffer)
+            
             ub_policy_vec.wait_data_ready(event_id_record)
             
             # 从 policy 获取 UB buffer（自动 ping-pong 切换）
@@ -550,10 +557,7 @@ def test_flashattention_complete_kernel(
             plm.exp(ub_qk, out=ub_qk)
             
             # Store结果到输出buffer
-            if round_idx == 0:
-                plm.store(ub_qk, [0, 0, 0, 0], [64, 64], out=output_buffer)
-            else:
-                plm.store(ub_qk, [0, 0, 0, 64], [64, 64], out=output_buffer)
+            # Store 已在上面 if 分支中处理
             
             # 释放 buffer (free)
             ub_policy_vec.free_buffer(event_id_free)
