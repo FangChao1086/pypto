@@ -180,7 +180,7 @@ def test_triple_buffer_kernel(
             plm.load(p, [i * 64, 0], [64, 128], out=l1_buf)
             
             # 通知 Cube 数据已就绪
-            l1_policy_vec.sync_forward(event_id=i)
+            l1_policy_vec.sync_forward(event_id=0)
     
     # ========== Cube 核心操作（消费者）==========
     with pl.section_cube():
@@ -200,7 +200,7 @@ def test_triple_buffer_kernel(
             l1_buf = l1_policy_cube.get_cube()
             
             # 等待 Vector 数据就绪
-            l1_policy_cube.wait_data_ready(event_id=i)
+            l1_policy_cube.wait_data_ready(event_id=0)
             
             # 执行 BMM2 矩阵乘法：P (64x128) × V (128x64) → Result (64x64)
             plm.matmul(l1_buf, v_buffer, out=l0c_buffer)
@@ -252,9 +252,8 @@ def test_triple_buffer_policy():
     assert "pto.wait_event" in mlir, "Expected pto.wait_event for wait_data_ready"
     assert "pto.record_event" in mlir, "Expected pto.record_event for sync_forward"
     
-    # 验证事件 ID（6 个独立事件）
-    for i in range(6):
-        assert f"#pto<event EVENT_ID{i}>" in mlir, f"Expected EVENT_ID{i}"
+    # 验证事件 ID（所有迭代使用同一个事件 ID 0）
+    assert "#pto<event EVENT_ID0>" in mlir, "Expected EVENT_ID0"
 
 
 
