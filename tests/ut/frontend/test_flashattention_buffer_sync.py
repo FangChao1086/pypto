@@ -501,35 +501,48 @@ def test_flashattention_complete_kernel(
                 q_buf = q_buf0
                 k_buf = k_buf0
                 l0c_qk = l0c_qk0
-                # 使用配对的 event_id
-                event_id_free = 0
-                event_id_record = 1
+                
+                # 等待 AIV 释放 buffer (allocate)
+                ub_policy_cube.allocate_buffer(0)
+                
+                # Load Q and K
+                plm.load(q, [0, 0, 0, 0], [1, 1, 64, 128], out=q_buf)
+                plm.load(k, [0, 0, 0, 0], [1, 1, 64, 128], out=k_buf)
+                
+                # BMM: QK = Q @ K^T (L1 -> L0C)
+                plm.matmul(q_buf, k_buf, out=l0c_qk)
+                
+                # 从 policy 获取 UB buffer（自动 ping-pong 切换）
+                ub_qk = ub_policy_cube.get()
+                
+                # Move L0C to UB
+                plm.move(l0c_qk, pl.MemorySpace.Mat, out=ub_qk)
+                
+                # 通知 AIV 数据已就绪 (record)
+                ub_policy_cube.record_data_ready(1)
             else:
                 q_buf = q_buf1
                 k_buf = k_buf1
                 l0c_qk = l0c_qk1
-                # 使用配对的 event_id
-                event_id_free = 2
-                event_id_record = 3
-            
-            # 等待 AIV 释放 buffer (allocate)
-            ub_policy_cube.allocate_buffer(event_id_free)
-            
-            # Load Q and K
-            plm.load(q, [0, 0, 0, 0], [1, 1, 64, 128], out=q_buf)
-            plm.load(k, [0, 0, 0, 0], [1, 1, 64, 128], out=k_buf)
-            
-            # BMM: QK = Q @ K^T (L1 -> L0C)
-            plm.matmul(q_buf, k_buf, out=l0c_qk)
-            
-            # 从 policy 获取 UB buffer（自动 ping-pong 切换）
-            ub_qk = ub_policy_cube.get()
-            
-            # Move L0C to UB
-            plm.move(l0c_qk, pl.MemorySpace.Mat, out=ub_qk)
-            
-            # 通知 AIV 数据已就绪 (record)
-            ub_policy_cube.record_data_ready(event_id_record)
+                
+                # 等待 AIV 释放 buffer (allocate)
+                ub_policy_cube.allocate_buffer(2)
+                
+                # Load Q and K
+                plm.load(q, [0, 0, 0, 0], [1, 1, 64, 128], out=q_buf)
+                plm.load(k, [0, 0, 0, 0], [1, 1, 64, 128], out=k_buf)
+                
+                # BMM: QK = Q @ K^T (L1 -> L0C)
+                plm.matmul(q_buf, k_buf, out=l0c_qk)
+                
+                # 从 policy 获取 UB buffer（自动 ping-pong 切换）
+                ub_qk = ub_policy_cube.get()
+                
+                # Move L0C to UB
+                plm.move(l0c_qk, pl.MemorySpace.Mat, out=ub_qk)
+                
+                # 通知 AIV 数据已就绪 (record)
+                ub_policy_cube.record_data_ready(3)
     
     # AIV 核心操作 - wait for QK and compute softmax
     with pl.section_vector():
@@ -540,27 +553,33 @@ def test_flashattention_complete_kernel(
         for round_idx in pl.range(2):
             # 等待 AIC 数据就绪 (wait)
             if round_idx == 0:
-                event_id_record = 1
-                event_id_free = 0
+                ub_policy_vec.wait_data_ready(1)
+                
+                # 从 policy 获取 UB buffer（自动 ping-pong 切换）
+                ub_qk = ub_policy_vec.get()
+                
+                # 使用 UB buffer 中的数据
+                plm.exp(ub_qk, out=ub_qk)
+                
+                # Store结果到输出buffer
                 plm.store(ub_qk, [0, 0, 0, 0], [64, 64], out=output_buffer)
+                
+                # 释放 buffer (free)
+                ub_policy_vec.free_buffer(0)
             else:
-                event_id_record = 3
-                event_id_free = 2
+                ub_policy_vec.wait_data_ready(3)
+                
+                # 从 policy 获取 UB buffer（自动 ping-pong 切换）
+                ub_qk = ub_policy_vec.get()
+                
+                # 使用 UB buffer 中的数据
+                plm.exp(ub_qk, out=ub_qk)
+                
+                # Store结果到输出buffer
                 plm.store(ub_qk, [0, 0, 0, 64], [64, 64], out=output_buffer)
-            
-            ub_policy_vec.wait_data_ready(event_id_record)
-            
-            # 从 policy 获取 UB buffer（自动 ping-pong 切换）
-            ub_qk = ub_policy_vec.get()
-            
-            # 使用 UB buffer 中的数据
-            plm.exp(ub_qk, out=ub_qk)
-            
-            # Store结果到输出buffer
-            # Store 已在上面 if 分支中处理
-            
-            # 释放 buffer (free)
-            ub_policy_vec.free_buffer(event_id_free)
+                
+                # 释放 buffer (free)
+                ub_policy_vec.free_buffer(2)
     
     return output_buffer
 
