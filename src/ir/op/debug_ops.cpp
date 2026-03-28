@@ -314,5 +314,16 @@ REGISTER_OP("debug.printf")
       return DeduceDebugPrintfType(args, kwargs);
     });
 
+REGISTER_OP("debug.trap")
+    .set_op_category("DebugOp")
+    .set_description("Abort execution by inserting a trap")
+    .no_argument()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      (void)args;
+      (void)kwargs;
+      return GetUnknownType();
+    });
+
 }  // namespace ir
 }  // namespace pypto

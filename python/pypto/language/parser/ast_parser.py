@@ -2641,6 +2641,20 @@ class ASTParser:
                 hint=f"Check if '{op_name}' is a valid debug operation",
             )
 
+        if op_name == "trap":
+            if call.keywords:
+                raise ParserSyntaxError(
+                    "trap does not accept keyword arguments",
+                    span=call_span,
+                )
+            if call.args:
+                raise ParserSyntaxError(
+                    f"trap takes no arguments, got {len(call.args)}",
+                    span=call_span,
+                )
+
+            return ir_op.debug.trap_(span=call_span)
+
         if op_name == "printf":
             if call.keywords:
                 raise ParserSyntaxError(
@@ -2706,6 +2720,7 @@ class ASTParser:
         "dump_tensor",
         "dump_tile",
         "printf",
+        "trap",
     })
 
     def _parse_manual_op(self, op_name: str, call: ast.Call) -> ir.Expr:
@@ -3252,6 +3267,7 @@ class ASTParser:
         "dump_tensor": "dump_tensor_",
         "dump_tile": "dump_tile_",
         "printf": "printf_",
+        "trap": "trap_",
     }
 
     # Ops that exist only in one module (no dispatch needed).

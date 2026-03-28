@@ -296,4 +296,10 @@ def printf_(format_str: str, *args: int | float | Expr, span: Span | None = None
     return _ir_core.create_op_call("debug.printf", normalized_args, kwargs, actual_span)
 
 
-__all__ = ["dump_tensor_", "dump_tile_", "printf_"]
+def trap_(*, span: Span | None = None) -> Call:
+    """Abort execution by inserting a trap."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("debug.trap", [], {}, actual_span)
+
+
+__all__ = ["dump_tensor_", "dump_tile_", "printf_", "trap_"]

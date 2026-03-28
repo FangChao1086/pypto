@@ -297,6 +297,26 @@ class TestErrorCases:
                 plm.printf("x=%hd", x)
                 return x
 
+    def test_trap_rejects_positional_arguments(self):
+        """trap should reject positional arguments."""
+
+        with pytest.raises(ParserSyntaxError, match="trap takes no arguments"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def trap_with_arg(x: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                plm.trap(1)  # type: ignore[call-arg]
+                return x
+
+    def test_trap_rejects_keyword_arguments(self):
+        """trap should reject keyword arguments."""
+
+        with pytest.raises(ParserSyntaxError, match="trap does not accept keyword arguments"):
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def trap_with_kwarg(x: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                plm.trap(value=1)  # type: ignore[call-arg]
+                return x
+
     def test_printf_accepts_bool_for_decimal_formats(self):
         """printf should accept bool scalars for %d/%i/%u."""
 

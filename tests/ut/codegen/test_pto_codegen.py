@@ -271,6 +271,13 @@ def test_debug_printf_ir_returns_unknown_type():
     assert isinstance(call.type, ir.UnknownType)
 
 
+def test_debug_trap_ir_returns_unknown_type():
+    """debug.trap IR helper should return UnknownType."""
+    call = debug_op.trap_()
+
+    assert isinstance(call.type, ir.UnknownType)
+
+
 def test_debug_printf_extended_types_return_unknown_type():
     """debug.printf should accept signed/unsigned/index/bool types per v1 policy."""
     span = ir.Span.unknown()
@@ -387,6 +394,34 @@ def test_pto_codegen_printf_pure_text_lowering():
     assert mlir_code.count("pto.print") == 1
     assert 'pto.print ins("hello world\\n", ' in mlir_code
     assert "arith.constant 0 : i32" in mlir_code
+
+
+def test_pto_codegen_trap_lowering():
+    """plm.trap should lower directly to pto.trap."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class TrapProgram:
+        @pl.function
+        def trap_test(
+            self,
+            input: pl.Tensor[[16, 16], pl.INT32],
+            output: pl.Tensor[[16, 16], pl.INT32],
+        ):
+            plm.trap()
+            tile = pl.load(input, offsets=[0, 0], shapes=[16, 16])
+            pl.store(tile, offsets=[0, 0], shapes=[16, 16], output_tensor=output)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(TrapProgram)
+
+    codegen_obj = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+
+    assert mlir_code.count("pto.trap") == 1
+    assert "pto.print" not in mlir_code
+    assert "pto.tprint" not in mlir_code
 
 
 def test_pto_codegen_printf_accepts_common_flags_width_precision():

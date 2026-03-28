@@ -616,6 +616,13 @@ static std::string MakeDebugPrintfCodegenPTO(const CallPtr& op, codegen::Codegen
   return "";
 }
 
+static std::string MakeTrapCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.empty()) << "debug.trap takes no arguments, but got " << op->args_.size();
+  codegen.Emit("pto.trap");
+  return "";
+}
+
 static std::string GetStaticPartitionType(const ir::MakeTuple* shapes_tuple, const std::string& dtype_str) {
   std::ostringstream oss;
   oss << "!pto.partition_tensor_view<";
@@ -1046,6 +1053,12 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "debug.printf")
     .set_pipe(ir::PipeType::S)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeDebugPrintfCodegenPTO(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "debug.trap")
+    .set_pipe(ir::PipeType::S)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeTrapCodegenPTO(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.reshape")
