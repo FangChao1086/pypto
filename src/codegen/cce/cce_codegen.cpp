@@ -362,35 +362,62 @@ void CCECodegen::GenerateSinglePrologue(const ir::FunctionPtr& func, bool has_cr
   }
   emitter_.EmitLine("");
 
-  // Collect access window shapes
-  auto access_shapes = CollectTensorAccessShapes(func->body_);
+  // Collect per-section access window shapes
+  auto section_shapes = CollectTensorAccessShapesPerSection(func->body_);
 
-  // Register parameters and emit GlobalTensor / scalar declarations
+  // Classify which sections each tensor parameter is used in
+  // A tensor may be in cube_shapes, vec_shapes, both, or neither (common only)
+  // Register all tensor parameters first (name mapping only)
+  std::vector<std::pair<ir::VarPtr, std::string>> tensor_params;  // (param, global_name)
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
     const std::string param_name = context_.SanitizeName(param);
 
     if (auto tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(param->GetType())) {
-      // Register with "Global" suffix
       const std::string global_name = param_name + "Global";
       context_.RegisterVar(param, global_name);
+      tensor_params.emplace_back(param, global_name);
+    } else if (auto scalar_type = std::dynamic_pointer_cast<const ir::ScalarType>(param->GetType())) {
+      context_.RegisterVar(param, param_name);
+    }
+  }
 
-      // Look up access window shape (by name, not pointer identity)
-      std::optional<std::vector<ir::ExprPtr>> access_shape;
-      auto it = access_shapes.find(param->name_);
-      if (it != access_shapes.end()) {
-        access_shape = it->second;
-      }
-
-      // For single-file mode: GlobalTensor using direct pointer (no Tensor struct indirection)
+  // Helper lambda to emit GlobalTensor declarations for a set of tensors
+  auto emit_global_tensors = [&](const std::map<std::string, std::vector<ir::ExprPtr>>& shapes) {
+    for (const auto& [param, global_name] : tensor_params) {
+      auto tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(param->GetType());
+      if (!tensor_type) continue;
+      auto it = shapes.find(param->name_);
+      if (it == shapes.end()) continue;
+      const std::string param_name = context_.SanitizeName(param);
+      std::optional<std::vector<ir::ExprPtr>> access_shape = it->second;
       force_dn_layout_ = (dn_tensors_.count(param->name_) > 0);
       GenerateGlobalTensorTypeDeclaration(global_name, tensor_type, param_name, std::nullopt, access_shape);
       force_dn_layout_ = false;
       emitter_.EmitLine("");
-    } else if (auto scalar_type = std::dynamic_pointer_cast<const ir::ScalarType>(param->GetType())) {
-      // Scalar params are direct function args
-      context_.RegisterVar(param, param_name);
     }
+  };
+
+  // Emit GlobalTensors for tensors only accessed outside any section (common area)
+  if (!section_shapes.common_shapes.empty()) {
+    emit_global_tensors(section_shapes.common_shapes);
+  }
+
+  // Emit GlobalTensors for tensors accessed in Cube section (with Cube access shapes)
+  // Tensors not in cube_shapes but only in vec_shapes get no declaration here (preprocessor skips)
+  if (!section_shapes.cube_shapes.empty()) {
+    emitter_.EmitLine("#if defined(__DAV_CUBE__)");
+    emit_global_tensors(section_shapes.cube_shapes);
+    emitter_.EmitLine("#endif");
+    emitter_.EmitLine("");
+  }
+
+  // Emit GlobalTensors for tensors accessed in Vector section (with Vector access shapes)
+  if (!section_shapes.vec_shapes.empty()) {
+    emitter_.EmitLine("#if defined(__DAV_VEC__)");
+    emit_global_tensors(section_shapes.vec_shapes);
+    emitter_.EmitLine("#endif");
+    emitter_.EmitLine("");
   }
 
   // Collect tile sections for section-aware declarations
@@ -1784,8 +1811,20 @@ class TileCollector : public ir::IRVisitor {
  */
 class TensorAccessShapeCollector : public ir::IRVisitor {
  public:
+  // Per-section access shapes: cube_access_shapes_ and vec_access_shapes_
+  // store the first access shape found within each section for each tensor.
+  // access_shapes_ stores shapes for tensors accessed outside any section.
   std::map<std::string, std::vector<ir::ExprPtr>> access_shapes_;
+  std::map<std::string, std::vector<ir::ExprPtr>> cube_access_shapes_;
+  std::map<std::string, std::vector<ir::ExprPtr>> vec_access_shapes_;
   std::set<std::string> dn_tensors_;  // tensor names loaded with layout="dn"
+
+  void VisitStmt_(const ir::SectionStmtPtr& op) override {
+    auto prev = current_section_;
+    current_section_ = op->section_kind_;
+    ir::IRVisitor::VisitStmt_(op);
+    current_section_ = prev;
+  }
 
   void VisitExpr_(const ir::CallPtr& op) override {
     const std::string& op_name = op->op_->name_;
@@ -1807,15 +1846,21 @@ class TensorAccessShapeCollector : public ir::IRVisitor {
           << "Internal error: " << op_name << " has unexpected argument count: " << op->args_.size();
       auto tensor_var = std::dynamic_pointer_cast<const ir::Var>(op->args_[tensor_arg_idx]);
       auto shapes_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[shapes_arg_idx]);
-      if (tensor_var && access_shapes_.find(tensor_var->name_) == access_shapes_.end()) {
+
+      // Select the target map based on current section
+      auto& target_map = current_section_.has_value()
+          ? (*current_section_ == ir::SectionKind::Cube ? cube_access_shapes_ : vec_access_shapes_)
+          : access_shapes_;
+
+      if (tensor_var && target_map.find(tensor_var->name_) == target_map.end()) {
         if (shapes_tuple && !shapes_tuple->elements_.empty()) {
-          access_shapes_[tensor_var->name_] = shapes_tuple->elements_;
+          target_map[tensor_var->name_] = shapes_tuple->elements_;
         } else {
           int tile_idx = (tensor_arg_idx == 0) ? 3 : 0;
           if (tile_idx < static_cast<int>(op->args_.size())) {
             auto tile_type = std::dynamic_pointer_cast<const ir::TileType>(op->args_[tile_idx]->GetType());
             if (tile_type) {
-              access_shapes_[tensor_var->name_] = tile_type->shape_;
+              target_map[tensor_var->name_] = tile_type->shape_;
             }
           }
         }
@@ -1830,6 +1875,9 @@ class TensorAccessShapeCollector : public ir::IRVisitor {
 
     ir::IRVisitor::VisitExpr_(op);
   }
+
+ private:
+  std::optional<ir::SectionKind> current_section_;
 };
 
 }  // namespace
@@ -1854,7 +1902,29 @@ std::map<std::string, std::vector<ir::ExprPtr>> CCECodegen::CollectTensorAccessS
   TensorAccessShapeCollector collector;
   collector.VisitStmt(stmt);
   dn_tensors_ = collector.dn_tensors_;
-  return collector.access_shapes_;
+  // Legacy: return the first access shape found (union of all sections)
+  auto result = collector.access_shapes_;
+  for (const auto& [k, v] : collector.cube_access_shapes_) {
+    if (result.find(k) == result.end()) result[k] = v;
+  }
+  for (const auto& [k, v] : collector.vec_access_shapes_) {
+    if (result.find(k) == result.end()) result[k] = v;
+  }
+  return result;
+}
+
+CCECodegen::SectionAccessShapes CCECodegen::CollectTensorAccessShapesPerSection(
+    const ir::StmtPtr& stmt) {
+  SectionAccessShapes result;
+  if (!stmt) return result;
+
+  TensorAccessShapeCollector collector;
+  collector.VisitStmt(stmt);
+  dn_tensors_ = collector.dn_tensors_;
+  result.common_shapes = std::move(collector.access_shapes_);
+  result.cube_shapes = std::move(collector.cube_access_shapes_);
+  result.vec_shapes = std::move(collector.vec_access_shapes_);
+  return result;
 }
 
 std::vector<int64_t> CCECodegen::ExtractShapeDimensions(const std::vector<ir::ExprPtr>& shape_exprs) {

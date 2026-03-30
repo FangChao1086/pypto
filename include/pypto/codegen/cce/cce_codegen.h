@@ -237,6 +237,15 @@ class CCECodegen : public CodegenBase {
    */
   std::map<std::string, std::vector<ir::ExprPtr>> CollectTensorAccessShapes(const ir::StmtPtr& stmt);
 
+  /// Per-section access shapes for GlobalTensor declarations
+  struct SectionAccessShapes {
+    std::map<std::string, std::vector<ir::ExprPtr>> common_shapes;  // outside any section
+    std::map<std::string, std::vector<ir::ExprPtr>> cube_shapes;
+    std::map<std::string, std::vector<ir::ExprPtr>> vec_shapes;
+  };
+
+  SectionAccessShapes CollectTensorAccessShapesPerSection(const ir::StmtPtr& stmt);
+
   /**
    * @brief Extract shape dimensions from shape expressions
    *

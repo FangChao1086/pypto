@@ -309,13 +309,13 @@ def fa_k_kernel(
             plm.row_max(reduce_dst, qk_vec, tmp_vec)
             pl.system.bar_v()  # TROWMAX → TROWEXPANDSUB
             plm.row_expand_sub(tmp_vec, qk_vec, reduce_dst)
-            plm.muls(global_max, reduce_dst, 1.0)  # save max (independent of row_expand_sub)
+            plm.muls(global_max_rm, reduce_dst_rm, 1.0)  # save max (RowMajor alias for CCE TMULS compat)
             plm.muls(tmp_vec, tmp_vec, SCALE)
             plm.exp(qk_vec, tmp_vec)
             pl.system.bar_v()  # TEXP → TROWSUM
             plm.row_sum(reduce_dst, qk_vec, tmp_vec)
             pl.system.bar_v()  # TROWSUM → TMULS(copy)
-            plm.muls(global_sum, reduce_dst, 1.0)
+            plm.muls(global_sum_rm, reduce_dst_rm, 1.0)
             plm.cast(p_f16, qk_vec, target_type=pl.FP16, mode="round")
             pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=0)
             pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=0)
@@ -392,7 +392,7 @@ def flash_attention_ref(q, k, v, d):
 
 
 def test_fa_k():
-    compiled = fe.compile(fa_k_kernel, arch="a3")
+    compiled = fe.compile(fa_k_kernel, arch="a3", codegen_mode="cce")
     print("compiled:", compiled.lib_path)
     device = "npu:5"
     torch.npu.set_device(device)
@@ -403,7 +403,7 @@ def test_fa_k():
     # original fa_k_kernel's pto.sync.set/wait pattern.
     for sq, skv, d, num_cores in [ # num_cores is the number of cores of Cube
         (8192, 8192, TD, 24),    # 4 cores, 1 Q tile each
-        #(128, 128, TD, 4),    # 4 cores, 1 Q tile each
+        # (128, 128, TD, 1),    # 4 cores, 1 Q tile each
     ]:
         print(f"\nFA-K ({sq},{skv},{d}) cores={num_cores}")
         q = torch.rand((sq, d), device=device, dtype=torch.float16)
