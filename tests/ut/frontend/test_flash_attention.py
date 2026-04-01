@@ -286,7 +286,7 @@ def flash_attention_kernel(
         num_tiles_s1 = s1 // TILE_S1
 
         for s0_tile in pl.range(block_idx, num_tiles_s0, block_num):
-            pl.system.wait_cross_core(pipe=pl.PipeType.FIX, event_id=FA_QK_READY)
+            pl.system.wait_cross_core(pipe=pl.PipeType.V, event_id=FA_QK_READY)
             s0_vec_tile = s0_tile * 2 + subblock_idx
             for s1_tile in pl.range(num_tiles_s1):
                 # pl.system.bar_all()
@@ -362,7 +362,7 @@ def flash_attention_kernel(
         num_tiles_s1 = s1 // TILE_S1
 
         for s0_tile in pl.range(block_idx, num_tiles_s0, block_num):
-            pl.system.wait_cross_core(pipe=pl.PipeType.MTE3, event_id=FA_P_READY)
+            pl.system.wait_cross_core(pipe=pl.PipeType.MTE2, event_id=FA_P_READY)
             for s1_tile in pl.range(num_tiles_s1):
                 plm.load_tile(p_mat, p_norm_buf, [s0_tile, s1_tile])
                 plm.load_tile(v_mat, v, [s1_tile, 0])
@@ -402,7 +402,7 @@ def flash_attention_kernel(
         num_tiles_s0 = s0 // TILE_S0
 
         for s0_tile in pl.range(block_idx, num_tiles_s0, block_num):
-            pl.system.wait_cross_core(pipe=pl.PipeType.FIX, event_id=FA_PV_READY)
+            pl.system.wait_cross_core(pipe=pl.PipeType.MTE2, event_id=FA_PV_READY)
             s0_vec_tile = s0_tile * 2 + subblock_idx
             # pl.system.bar_all()
             plm.load_tile(qk_vec, pv_buf, [s0_vec_tile, 0])
@@ -434,7 +434,7 @@ def test_flash_attention_multicore():
     compiled_lib = fe.compile(flash_attention_kernel, arch="a3")
     print("compiled lib path:", compiled_lib.lib_path, flush=True)
 
-    device = "npu:7"
+    device = "npu:0"
     torch.npu.set_device(device)
 
     s0 = TEST_S0

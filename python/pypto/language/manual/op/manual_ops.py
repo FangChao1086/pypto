@@ -510,6 +510,122 @@ def shr(lhs: Tile, rhs: Tile, out: Tile) -> None:
     """Element-wise right shift: out = lhs >> rhs (integer tiles)."""
     _op("manual.shr", [lhs.unwrap(), rhs.unwrap()], out)
 
+def add_relu(lhs: Tile, rhs: Tile, out: Tile) -> None:
+    """Element-wise addition RELU: out = max(0, (lhs + rhs))."""
+    _op("manual.add_relu", [lhs.unwrap(), rhs.unwrap()], out)
+
+def sub_relu(lhs: Tile, rhs: Tile, out: Tile) -> None:
+    """Element-wise subtraction RELU: out = max(0, (lhs - rhs))."""
+    _op("manual.sub_relu", [lhs.unwrap(), rhs.unwrap()], out)
+
+def add_relu_cast(
+    lhs: Tile,
+    rhs: Tile,
+    out: Tile,
+    target_type: int | DataType,
+    mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
+) -> None:
+    """Element-wise addition RELU with cast: out = cast(max(0, (lhs + rhs)), target_type, mode).
+
+    Args:
+        lhs: Left tile.
+        rhs: Right tile.
+        out: Pre-allocated output tile with desired result dtype.
+        target_type: Target DataType.
+        mode: Rounding mode string.
+    """
+    _op("manual.add_relu_cast", [lhs.unwrap(), rhs.unwrap()], out, target_type=target_type, mode=mode)
+
+def sub_relu_cast(
+    lhs: Tile,
+    rhs: Tile,
+    out: Tile,
+    target_type: int | DataType,
+    mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
+) -> None:
+    """Element-wise subtraction RELU with cast: out = cast(max(0, (lhs - rhs)), target_type, mode).
+
+    Args:
+        lhs: Left tile.
+        rhs: Right tile.
+        out: Pre-allocated output tile with desired result dtype.
+        target_type: Target DataType.
+        mode: Rounding mode string.
+    """
+    _op("manual.sub_relu_cast", [lhs.unwrap(), rhs.unwrap()], out, target_type=target_type, mode=mode)
+
+def mul_cast(
+    lhs: Tile,
+    rhs: Tile,
+    out: Tile,
+    target_type: int | DataType,
+    mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
+) -> None:
+    """Element-wise multiplication with cast: out = cast(lhs * rhs, target_type, mode).
+
+    Args:
+        lhs: Left tile.
+        rhs: Right tile.
+        out: Pre-allocated output tile with desired result dtype.
+        target_type: Target DataType.
+        mode: Rounding mode string.
+    """
+    _op("manual.mul_cast", [lhs.unwrap(), rhs.unwrap()], out, target_type=target_type, mode=mode)
+
+def mul_add_dst(lhs: Tile, rhs: Tile, out: Tile) -> None:
+    """Element-wise multiplication with destination accumulation: out = (lhs * rhs) + out.
+
+    Args:
+        lhs: Left tile.
+        rhs: Right tile.
+        out: Pre-allocated output tile; used as both accumulator and destination.
+    """
+    _op("manual.mul_add_dst", [lhs.unwrap(), rhs.unwrap()], out)
+
+def fused_mul_add(lhs: Tile, rhs: Tile, out: Tile) -> None:
+    """Element-wise fused multiply-add: out = (lhs * out) + rhs.
+
+    Args:
+        lhs: Left tile (multiplied with).
+        rhs: Right tile (added to product).
+        out: Pre-allocated output tile; used as both multiplier and destination.
+    """
+    _op("manual.fused_mul_add", [lhs.unwrap(), rhs.unwrap()], out)
+
+def fused_mul_add_relu(lhs: Tile, rhs: Tile, out: Tile) -> None:
+    """Element-wise fused multiply-add-relu: out = max(0, (lhs * out) + rhs).
+
+    Args:
+        lhs: Left tile (multiplied with).
+        rhs: Right tile (added to product).
+        out: Pre-allocated output tile; used as both multiplier and destination.
+    """
+    _op("manual.fused_mul_add_relu", [lhs.unwrap(), rhs.unwrap()], out)
+
+def gather(src: Tile, indices: Tile, out: Tile, tmp: Tile | None = None) -> None:
+    """Gather elements from source tile using indices: out[i] = src[indices[i]].
+
+    Args:
+        src: Source tile.
+        indices: Index tile.
+        out: Pre-allocated output tile.
+        tmp: Optional temporary tile for index gather.
+    """
+    if tmp is None:
+        _op("manual.gather", [src.unwrap(), indices.unwrap()], out)
+    else:
+        _op("manual.gather", [src.unwrap(), indices.unwrap(), tmp.unwrap()], out)
+
+def gatherb(src: Tile, offsets: Tile, out: Tile) -> None:
+    """Gather elements using per-element byte offsets: out[i] = src[byte_offsets[i]].
+
+    Args:
+        src: Source tile.
+        offsets: Byte offset tile.
+        out: Pre-allocated output tile.
+    """
+    _op("manual.gatherb", [src.unwrap(), offsets.unwrap()], out)
+
 
 # ---------------------------------------------------------------------------
 # Element-wise Tile x Scalar binary operations
@@ -883,7 +999,8 @@ __all__ = [
     "get_block_num", "get_subblock_idx",
     # Tile x Tile binary
     "add", "sub", "mul", "div", "rem", "maximum", "minimum",
-    "and_", "or_", "shl", "shr",
+    "and_", "or_", "shl", "shr", "add_relu", "sub_relu", "add_relu_cast", "sub_relu_cast", "mul_cast",
+    "mul_add_dst", "fused_mul_add", "fused_mul_add_relu",
     # Tile x Scalar binary
     "adds", "subs", "muls", "divs", "rems",
     "ands", "ors", "shls", "shrs",
@@ -894,6 +1011,8 @@ __all__ = [
     "xor", "xors", "prelu", "addc", "subc", "addsc", "subsc", "sel", "sels",
     # Comparison
     "cmp", "cmps",
+    # gather
+    "gather", "gatherb",
     # Reduction
     "row_max", "row_sum", "row_min",
     # Broadcast

@@ -188,7 +188,7 @@ def compute_pv(ctx, state, const_info):
     buf_idx = (ctx.q_count * ctx.skv_tiles + ctx.ki) % 2
     pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=event_ids_23[buf_idx])
     plm.load(v_mat_buf[buf_idx], v, [sv_off, 0])
-    pl.system.wait_cross_core(pipe=pl.PipeType.M, event_id=P_READY_IDS[pv_fifo_slot], max_event_id=P_MAX_EID)
+    pl.system.wait_cross_core(pipe=pl.PipeType.MTE2, event_id=P_READY_IDS[pv_fifo_slot], max_event_id=P_MAX_EID)
     plm.load(p_mat_buf[buf_idx], p_buf, [pv_fifo_slot * const_info.sq_dim + ctx.sq_off, sv_off])
     pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
     pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
@@ -271,7 +271,7 @@ def softmax_body(ctx, sq_dim, row_off):
 def compute_p(ctx, sq_dim, row_off):
     """Softmax on QK tile → P. Includes cross-core sync."""
     p_fifo_slot = ctx.task_id % FIFO_SIZE
-    pl.system.wait_cross_core(pipe=pl.PipeType.V, event_id=QK_READY_IDS[p_fifo_slot], max_event_id=QK_MAX_EID)
+    pl.system.wait_cross_core(pipe=pl.PipeType.MTE2, event_id=QK_READY_IDS[p_fifo_slot], max_event_id=QK_MAX_EID)
     softmax_body(ctx, sq_dim, row_off)
     pl.system.set_cross_core(pipe=pl.PipeType.MTE3, event_id=P_READY_IDS[p_fifo_slot], max_event_id=P_MAX_EID)
     return
@@ -280,7 +280,7 @@ def compute_p(ctx, sq_dim, row_off):
 def compute_gu(ctx, row_off):
     """GU: running output update. Includes cross-core sync."""
     pv_slot = ctx.task_id % FIFO_SIZE
-    pl.system.wait_cross_core(pipe=pl.PipeType.V, event_id=PV_READY_IDS[pv_slot], max_event_id=PV_MAX_EID)
+    pl.system.wait_cross_core(pipe=pl.PipeType.MTE2, event_id=PV_READY_IDS[pv_slot], max_event_id=PV_MAX_EID)
     if ctx.ki == 0:
         plm.load(running_o, pv_buf, [ctx.core_id * PV_CORE_STRIDE + (ctx.q_count % 2) * FIFO_SIZE * TS + pv_slot * TS + row_off, 0])
         pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
