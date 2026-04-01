@@ -164,18 +164,21 @@ class TestErrorCases:
                 plm.dump_tensor(x)  # type: ignore[arg-type]
                 return x
 
-    def test_dump_tensor_rejects_dynamic_window(self):
-        """dump_tensor v1 only supports static offsets/shapes."""
+    def test_dump_tensor_accepts_dynamic_window(self):
+        """dump_tensor should accept dynamic offsets/shapes."""
 
-        with pytest.raises(ParserSyntaxError, match="static offsets"):
+        M = pl.DynVar("M")
 
-            @pl.function
-            def dynamic_window(
-                x: pl.Tensor[[32, 32], pl.FP32],
-                i: pl.Scalar[pl.INDEX],
-            ) -> pl.Tensor[[32, 32], pl.FP32]:
-                plm.dump_tensor(x, offsets=[i, 0], shapes=[16, 16])
-                return x
+        @pl.function
+        def dynamic_window(
+            x: pl.Tensor[[M, 32], pl.FP32],
+            i: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[M, 32], pl.FP32]:
+            m = pl.tensor.dim(x, 0)
+            plm.dump_tensor(x, offsets=[i, 0], shapes=[m, 16])
+            return x
+
+        assert isinstance(dynamic_window, pypto.ir.Function)
 
     def test_dump_tensor_window_requires_innermost_stride_one(self):
         """dump_tensor windowed mode should reject non-contiguous innermost stride."""
@@ -209,6 +212,20 @@ class TestErrorCases:
                 tile = pl.load(x, offsets=[0, 0], shapes=[16, 16])
                 plm.dump_tile(tile, offsets=[0, 0])
                 return x
+
+    def test_dump_tile_accepts_dynamic_offsets(self):
+        """dump_tile should accept dynamic window offsets."""
+
+        @pl.function
+        def dynamic_tile_window(
+            x: pl.Tensor[[32, 32], pl.FP32],
+            i: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
+            tile = pl.load(x, offsets=[0, 0], shapes=[16, 16])
+            plm.dump_tile(tile, offsets=[i, 0], shapes=[8, 16])
+            return x
+
+        assert isinstance(dynamic_tile_window, pypto.ir.Function)
                 
     def test_printf_requires_string_literal_format(self):
         """printf should reject non-string-literal format arguments."""

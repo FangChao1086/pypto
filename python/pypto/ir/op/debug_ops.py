@@ -188,7 +188,21 @@ def dump_tensor(
     shapes: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Print a tensor or tensor window for debugging."""
+    """Print a tensor or tensor window for debugging.
+
+    Supported forms:
+    - Full tensor dump: ``dump_tensor(tensor)``
+    - Full dumps with dynamic tensor shapes
+    - Window dump with dynamic ``offsets``
+    - Window dump with dynamic ``shapes``
+
+    Backend support:
+    - PTO: full dump and window dump support dynamic ``offsets``/``shapes``
+    - CCE: full dump and window dump support dynamic ``offsets``/``shapes``
+
+    Current limitation:
+    - Windowed dumps still require the innermost tensor stride to be statically 1
+    """
     actual_span = _get_span_or_capture(span)
     tensor_type = tensor.type
     if not isinstance(tensor_type, TensorType):
@@ -224,20 +238,8 @@ def dump_tensor(
             f"{len(offsets_tuple.elements)} offsets and {len(shapes_tuple.elements)} shapes"
         )
 
-    for idx, offset_expr in enumerate(offsets_tuple.elements):
-        if not isinstance(offset_expr, ConstInt):
-            raise NotImplementedError(
-                "debug.dump_tensor currently only supports static offsets, "
-                f"got dynamic offset at axis {idx}"
-            )
-
     for idx, shape_expr in enumerate(shapes_tuple.elements):
-        if not isinstance(shape_expr, ConstInt):
-            raise NotImplementedError(
-                "debug.dump_tensor currently only supports static shapes, "
-                f"got dynamic shape at axis {idx}"
-            )
-        if shape_expr.value <= 0:
+        if isinstance(shape_expr, ConstInt) and shape_expr.value <= 0:
             raise ValueError(
                 f"debug.dump_tensor shape at axis {idx} must be positive, got {shape_expr.value}"
             )
@@ -253,7 +255,24 @@ def dump_tile(
     shapes: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Print a tile or tile window for debugging."""
+    """Print a tile or tile window for debugging.
+
+    Supported forms:
+    - Full tile dump: ``dump_tile(tile)``
+    - Full dump of tiles with dynamic valid-shape
+    - Window dump with dynamic ``offsets`` on PTO and CCE
+    - Window dump with dynamic ``shapes`` on CCE
+
+    Backend support:
+    - PTO: window ``shapes`` must still be static
+    - CCE: window ``shapes`` may be dynamic
+
+    Current limitations:
+    - Tile windows are currently 2D-only
+    - Tile printing requires a printable ``vec`` tile; CCE window dumps handle
+      this by copying the requested window into a temporary vec tile before
+      printing
+    """
     actual_span = _get_span_or_capture(span)
     tile_type = tile.type
     if not isinstance(tile_type, TileType):
@@ -273,20 +292,8 @@ def dump_tile(
             f"{len(offsets_tuple.elements)} offsets and {len(shapes_tuple.elements)} shapes"
         )
 
-    for idx, offset_expr in enumerate(offsets_tuple.elements):
-        if not isinstance(offset_expr, ConstInt):
-            raise NotImplementedError(
-                "debug.dump_tile currently only supports static offsets, "
-                f"got dynamic offset at axis {idx}"
-            )
-
     for idx, shape_expr in enumerate(shapes_tuple.elements):
-        if not isinstance(shape_expr, ConstInt):
-            raise NotImplementedError(
-                "debug.dump_tile currently only supports static shapes, "
-                f"got dynamic shape at axis {idx}"
-            )
-        if shape_expr.value <= 0:
+        if isinstance(shape_expr, ConstInt) and shape_expr.value <= 0:
             raise ValueError(
                 f"debug.dump_tile shape at axis {idx} must be positive, got {shape_expr.value}"
             )

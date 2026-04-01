@@ -91,6 +91,13 @@ PARAM_PATTERN = re.compile(r"__gm__\s*(\w+)\s*\*\s*(\w+)")
 
 # Pattern for a scalar param: type name (no pointer, no __gm__)
 SCALAR_PARAM_PATTERN = re.compile(r"^(\w+)\s+(\w+)$")
+CPP_NON_CODE_PATTERN = re.compile(
+    r"//.*?$|/\*.*?\*/|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'",
+    re.MULTILINE | re.DOTALL,
+)
+TPRINT_CALL_PATTERN = re.compile(r"\bTPRINT\s*\(")
+CCE_PRINTF_CALL_PATTERN = re.compile(r"\bcce::printf\s*\(")
+PRINTF_CALL_PATTERN = re.compile(r"(?<![\w:])printf\s*\(")
 
 
 def parse_kernel_signature(
@@ -475,6 +482,16 @@ def _normalize_arch(arch: str | None) -> str:
     return value
 
 
+def _detect_print_debug_from_cpp(content: str) -> bool:
+    """Best-effort detection for device-side debug print usage in generated C++."""
+    scrubbed = CPP_NON_CODE_PATTERN.sub(" ", content)
+    return bool(
+        TPRINT_CALL_PATTERN.search(scrubbed)
+        or CCE_PRINTF_CALL_PATTERN.search(scrubbed)
+        or PRINTF_CALL_PATTERN.search(scrubbed)
+    )
+
+
 def _build_bisheng_flags(toolkit_home: str, arch: str, cpp_content: str, has_cross_sync: bool,
                          enable_print_debug: bool) -> list[str]:
     """Build bisheng flags for single-command shared-library compilation.
@@ -598,7 +615,7 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3", enable_print_deb
             # Remove the ffts_addr param from kernel_params (last param)
             kernel_params = kernel_params[:-1]
 
-        needs_print_debug = False
+        needs_print_debug = _detect_print_debug_from_cpp(content)
         caller_content = _generate_caller_cpp(
             kernel_params=kernel_params,
             kernel_cpp_name="kernel.cpp",

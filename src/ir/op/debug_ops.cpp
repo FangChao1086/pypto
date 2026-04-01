@@ -159,8 +159,6 @@ TypePtr DeduceDebugDumpTensorType(const std::vector<ExprPtr>& args,
     CHECK(offset_scalar->dtype_.IsInt())
         << "debug.dump_tensor offset element " << i << " must have integer dtype, but got "
         << offset_scalar->dtype_.ToString();
-    CHECK(As<ConstInt>(offsets->elements_[i]))
-        << "debug.dump_tensor currently only supports static offsets; axis " << i << " is dynamic";
 
     auto shape_scalar = As<ScalarType>(shapes->elements_[i]->GetType());
     CHECK(shape_scalar) << "debug.dump_tensor shape element " << i << " must be ScalarType, but got "
@@ -169,10 +167,10 @@ TypePtr DeduceDebugDumpTensorType(const std::vector<ExprPtr>& args,
         << "debug.dump_tensor shape element " << i << " must have integer dtype, but got "
         << shape_scalar->dtype_.ToString();
     auto shape_const = As<ConstInt>(shapes->elements_[i]);
-    CHECK(shape_const) << "debug.dump_tensor currently only supports static shapes; axis " << i
-                       << " is dynamic";
-    CHECK(shape_const->value_ > 0) << "debug.dump_tensor shape element " << i
-                                   << " must be positive, got " << shape_const->value_;
+    if (shape_const) {
+      CHECK(shape_const->value_ > 0) << "debug.dump_tensor shape element " << i
+                                     << " must be positive, got " << shape_const->value_;
+    }
   }
 
   return GetUnknownType();
@@ -211,8 +209,6 @@ TypePtr DeduceDebugDumpTileType(const std::vector<ExprPtr>& args,
       CHECK(offset_scalar->dtype_.IsInt())
           << "debug.dump_tile offset element " << i << " must have integer dtype, but got "
           << offset_scalar->dtype_.ToString();
-      CHECK(As<ConstInt>(offsets->elements_[i]))
-          << "debug.dump_tile currently only supports static offsets; axis " << i << " is dynamic";
 
       auto shape_scalar = As<ScalarType>(shapes->elements_[i]->GetType());
       CHECK(shape_scalar) << "debug.dump_tile shape element " << i << " must be ScalarType, but got "
@@ -220,11 +216,10 @@ TypePtr DeduceDebugDumpTileType(const std::vector<ExprPtr>& args,
       CHECK(shape_scalar->dtype_.IsInt())
           << "debug.dump_tile shape element " << i << " must have integer dtype, but got "
           << shape_scalar->dtype_.ToString();
-      auto shape_const = As<ConstInt>(shapes->elements_[i]);
-      CHECK(shape_const) << "debug.dump_tile currently only supports static shapes; axis " << i
-                         << " is dynamic";
-      CHECK(shape_const->value_ > 0) << "debug.dump_tile shape element " << i
-                                     << " must be positive, got " << shape_const->value_;
+      if (auto shape_const = As<ConstInt>(shapes->elements_[i])) {
+        CHECK(shape_const->value_ > 0) << "debug.dump_tile shape element " << i
+                                       << " must be positive, got " << shape_const->value_;
+      }
     }
   }
 
@@ -348,10 +343,12 @@ TypePtr DeduceDebugAssertType(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("debug.dump_tensor")
     .set_op_category("DebugOp")
-    .set_description("Print a tensor or tensor window for debugging")
+    .set_description(
+        "Print a tensor or tensor window for debugging. Supports full dumps and window dumps "
+        "with dynamic offsets/shapes when the innermost stride is statically 1.")
     .add_argument("tensor", "Input tensor (TensorType)")
-    .add_argument("offsets", "Static offsets per dimension (MakeTuple of ConstInt)")
-    .add_argument("shapes", "Static shape per dimension (MakeTuple of ConstInt)")
+    .add_argument("offsets", "Offsets per dimension (MakeTuple of integer scalars)")
+    .add_argument("shapes", "Shape per dimension (MakeTuple of integer scalars)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceDebugDumpTensorType(args, kwargs);
@@ -359,10 +356,13 @@ REGISTER_OP("debug.dump_tensor")
 
 REGISTER_OP("debug.dump_tile")
     .set_op_category("DebugOp")
-    .set_description("Print a tile or tile window for debugging")
+    .set_description(
+        "Print a tile or tile window for debugging. Full dumps support tiles with dynamic valid-shape; "
+        "window dumps support dynamic offsets on PTO and CCE, and dynamic shapes on CCE only; "
+        "PTO window shapes remain static-only. Tile windows are currently 2D-only.")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("offsets", "Optional static offsets per dimension (MakeTuple of ConstInt)")
-    .add_argument("shapes", "Optional static shape per dimension (MakeTuple of ConstInt)")
+    .add_argument("offsets", "Optional offsets per dimension (MakeTuple of integer scalars)")
+    .add_argument("shapes", "Optional shape per dimension (MakeTuple of integer scalars; dynamic only on CCE)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceDebugDumpTileType(args, kwargs);

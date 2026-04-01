@@ -246,6 +246,21 @@ static std::string MakeManualMoveCodegenCCE(const ir::CallPtr& op, codegen::Code
 }
 
 // ============================================================================
+// manual.set_validshape — args = [row, col, tile]
+// Emits: tile.SetValidShape(row, col);
+// ============================================================================
+static std::string MakeManualSetValidShapeCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "manual.set_validshape: expected 3 args (row, col, tile), got "
+                               << op->args_.size();
+  std::string row = codegen.GetExprAsCode(op->args_[0]);
+  std::string col = codegen.GetExprAsCode(op->args_[1]);
+  std::string tile = codegen.GetExprAsCode(op->args_[2]);
+  codegen.Emit(tile + ".SetValidShape(" + row + ", " + col + ");");
+  return "";
+}
+
+// ============================================================================
 // manual.matmul — args = [left, right, dst]
 // Emits: TMATMUL(dst, left, right);
 // ============================================================================
@@ -412,6 +427,12 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "manual.make_tile")
     .set_pipe(ir::PipeType::MTE2)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeManualMakeTileCodegenCCE(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.set_validshape")
+    .set_pipe(ir::PipeType::S)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualSetValidShapeCodegenCCE(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "manual.move")

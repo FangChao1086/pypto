@@ -264,6 +264,12 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
     }
     return default_value;
   };
+  auto is_dynamic_dim = [](const ir::ExprPtr& expr) {
+    if (auto const_int = As<ir::ConstInt>(expr)) {
+      return const_int->value_ < 0;
+    }
+    return true;
+  };
   auto build_tile_buf_type = [&](const TileType* tile_type, const ir::MakeTuple* shapes_tuple = nullptr,
                                  const ir::MakeTuple* offsets_tuple = nullptr) {
     INTERNAL_CHECK(tile_type) << "tile type must not be null";
@@ -276,6 +282,8 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
     int64_t cols = get_const_or_default(tile_type->shape_[1], 32);
     int64_t v_row = rows;
     int64_t v_col = cols;
+    bool v_row_dynamic = false;
+    bool v_col_dynamic = false;
     ir::TileLayout blayout = ir::TileLayout::row_major;
     ir::TileLayout slayout = ir::TileLayout::none_box;
     uint64_t fractal = 512;
@@ -284,8 +292,16 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
     if (tile_type->tile_view_.has_value()) {
       const auto& tile_view = tile_type->tile_view_.value();
       if (tile_view.valid_shape.size() == 2) {
-        v_row = get_const_or_default(tile_view.valid_shape[0], v_row);
-        v_col = get_const_or_default(tile_view.valid_shape[1], v_col);
+        if (is_dynamic_dim(tile_view.valid_shape[0])) {
+          v_row_dynamic = true;
+        } else {
+          v_row = get_const_or_default(tile_view.valid_shape[0], v_row);
+        }
+        if (is_dynamic_dim(tile_view.valid_shape[1])) {
+          v_col_dynamic = true;
+        } else {
+          v_col = get_const_or_default(tile_view.valid_shape[1], v_col);
+        }
       }
       blayout = tile_view.blayout;
       slayout = tile_view.slayout;
@@ -298,20 +314,31 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
       cols = get_const_or_default(shapes_tuple->elements_[1], cols);
       v_row = rows;
       v_col = cols;
+      v_row_dynamic = false;
+      v_col_dynamic = false;
       if (offsets_tuple != nullptr && tile_type->tile_view_.has_value() &&
           tile_type->tile_view_->valid_shape.size() == 2) {
-        int64_t src_valid_row = get_const_or_default(tile_type->tile_view_->valid_shape[0], rows);
-        int64_t src_valid_col = get_const_or_default(tile_type->tile_view_->valid_shape[1], cols);
-        int64_t row_off = get_const_or_default(offsets_tuple->elements_[0], 0);
-        int64_t col_off = get_const_or_default(offsets_tuple->elements_[1], 0);
-        v_row = std::max<int64_t>(0, std::min<int64_t>(rows, src_valid_row - row_off));
-        v_col = std::max<int64_t>(0, std::min<int64_t>(cols, src_valid_col - col_off));
+        auto src_valid_row = As<ir::ConstInt>(tile_type->tile_view_->valid_shape[0]);
+        auto src_valid_col = As<ir::ConstInt>(tile_type->tile_view_->valid_shape[1]);
+        auto row_off = As<ir::ConstInt>(offsets_tuple->elements_[0]);
+        auto col_off = As<ir::ConstInt>(offsets_tuple->elements_[1]);
+        if (src_valid_row && src_valid_row->value_ >= 0 && row_off) {
+          v_row = std::max<int64_t>(0, std::min<int64_t>(rows, src_valid_row->value_ - row_off->value_));
+        } else {
+          v_row_dynamic = true;
+        }
+        if (src_valid_col && src_valid_col->value_ >= 0 && col_off) {
+          v_col = std::max<int64_t>(0, std::min<int64_t>(cols, src_valid_col->value_ - col_off->value_));
+        } else {
+          v_col_dynamic = true;
+        }
       }
     }
     std::ostringstream oss;
     oss << "!pto.tile_buf<loc=" << loc << ", dtype=" << dtype_str;
     oss << ", rows=" << rows << ", cols=" << cols;
-    oss << ", v_row=" << v_row << ", v_col=" << v_col;
+    oss << ", v_row=" << (v_row_dynamic ? "?" : std::to_string(v_row));
+    oss << ", v_col=" << (v_col_dynamic ? "?" : std::to_string(v_col));
     oss << ", blayout=" << tile_layout_to_str(blayout);
     oss << ", slayout=" << tile_layout_to_str(slayout);
     oss << ", fractal=" << fractal << ", pad=" << static_cast<int>(pad);
@@ -650,11 +677,11 @@ static std::string MakeDebugAssertCodegenPTO(const CallPtr& op, codegen::Codegen
   std::string condition_text = op->GetKwarg<std::string>("condition_text");
   std::string format = op->GetKwarg<std::string>("format");
 
-  std::string true_value = codegen.NewTemp();
-  codegen.Emit(true_value + " = arith.constant 1 : i1");
+  std::string false_value = codegen.NewTemp();
+  codegen.Emit(false_value + " = arith.constant false");
 
   std::string failed = codegen.NewTemp();
-  codegen.Emit(failed + " = arith.xori " + condition + ", " + true_value + " : i1");
+  codegen.Emit(failed + " = arith.cmpi eq, " + condition + ", " + false_value + " : i1");
 
   std::string printed_message = "[ASSERT] Assertion '" + condition_text + "'";
   if (!format.empty()) {
@@ -678,14 +705,16 @@ static std::string MakeTrapCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
   return "";
 }
 
-static std::string GetStaticPartitionType(const ir::MakeTuple* shapes_tuple, const std::string& dtype_str) {
+static std::string GetPartitionType(const ir::MakeTuple* shapes_tuple, const std::string& dtype_str) {
   std::ostringstream oss;
   oss << "!pto.partition_tensor_view<";
   for (size_t i = 0; i < shapes_tuple->elements_.size(); ++i) {
     if (i > 0) oss << "x";
-    auto dim = As<ir::ConstInt>(shapes_tuple->elements_[i]);
-    INTERNAL_CHECK(dim) << "partition shape must be static ConstInt at axis " << i;
-    oss << dim->value_;
+    if (auto dim = As<ir::ConstInt>(shapes_tuple->elements_[i])) {
+      oss << dim->value_;
+    } else {
+      oss << "?";
+    }
   }
   oss << "x" << dtype_str << ">";
   return oss.str();
@@ -710,7 +739,7 @@ static std::string MakeTensorPrintCodegenPTO(const CallPtr& op, codegen::Codegen
   std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
-  std::string partition_type = GetStaticPartitionType(shapes_tuple.get(), dtype_str);
+  std::string partition_type = GetPartitionType(shapes_tuple.get(), dtype_str);
 
   std::string partition_view = codegen.NewTemp();
   std::ostringstream partition_line;

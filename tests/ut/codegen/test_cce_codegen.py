@@ -10,6 +10,7 @@
 """Unit tests for CCECodegen class."""
 
 import pypto.language as pl
+import pypto.language.manual as plm
 import pytest
 from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
@@ -367,6 +368,100 @@ class TestMatmulCodegen:
         # Verify both TMATMUL and TMATMUL_ACC are generated
         assert "TMATMUL(" in code
         assert "TMATMUL_ACC(" in code
+
+
+def test_debug_dump_tensor_dynamic_shape_codegen():
+    """CCE debug.dump_tensor should emit a runtime GlobalTensor view for dynamic shapes."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.CCE)
+    M = pl.DynVar("M")
+
+    @pl.program
+    class DebugDumpTensorShapeProgram:
+        @pl.function
+        def debug_dump_tensor_shape(
+            self,
+            input: pl.Tensor[[M, 32], pl.FP32],
+            output: pl.Tensor[[M, 32], pl.FP32],
+        ):
+            rows = pl.tensor.dim(input, 0)
+            plm.dump_tensor(input, offsets=[0, 0], shapes=[rows, 16])
+            return output
+
+    pm = PassManager.get_strategy()
+    optimized_program = pm.run_passes(DebugDumpTensorShapeProgram)
+
+    generator = codegen.CCECodegen()
+    files = generator.generate(optimized_program)
+    code = files["kernels/aiv/debug_dump_tensor_shape.cpp"]
+
+    assert "using __debug_dump_tensor_shape_" in code
+    assert "Shape<1, 1, 1, -1, 16>" in code
+    assert "GlobalTensor<float" in code
+    assert "TPRINT(__debug_dump_tensor_view_" in code
+
+
+def test_debug_dump_tensor_dynamic_window_codegen():
+    """CCE debug.dump_tensor should preserve dynamic offsets in the runtime view."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.CCE)
+    M = pl.DynVar("M")
+
+    @pl.program
+    class DebugDumpTensorWindowProgram:
+        @pl.function
+        def debug_dump_tensor_window(
+            self,
+            input: pl.Tensor[[M, 32], pl.FP32],
+            row_off: pl.Scalar[pl.INDEX],
+            output: pl.Tensor[[M, 32], pl.FP32],
+        ):
+            rows = pl.tensor.dim(input, 0)
+            plm.dump_tensor(input, offsets=[row_off, 0], shapes=[rows, 16])
+            return output
+
+    pm = PassManager.get_strategy()
+    optimized_program = pm.run_passes(DebugDumpTensorWindowProgram)
+
+    generator = codegen.CCECodegen()
+    files = generator.generate(optimized_program)
+    code = files["kernels/aiv/debug_dump_tensor_window.cpp"]
+
+    assert "__debug_dump_tensor_view_" in code
+    assert "TPRINT(__debug_dump_tensor_view_" in code
+    assert " + (" in code or " + " in code
+
+
+def test_debug_dump_tile_dynamic_offset_codegen():
+    """CCE dump_tile window lowering should emit runtime clamp logic and direct printing."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.CCE)
+
+    @pl.program
+    class DebugDumpTileOffsetProgram:
+        @pl.function
+        def debug_dump_tile_offset(
+            self,
+            input: pl.Tensor[[32, 32], pl.FP32],
+            row_off: pl.Scalar[pl.INDEX],
+            output: pl.Tensor[[32, 32], pl.FP32],
+        ):
+            tile = pl.load(input, offsets=[0, 0], shapes=[16, 16])
+            plm.dump_tile(tile, offsets=[row_off, 0], shapes=[8, 16])
+            return output
+
+    pm = PassManager.get_strategy()
+    optimized_program = pm.run_passes(DebugDumpTileOffsetProgram)
+
+    generator = codegen.CCECodegen()
+    files = generator.generate(optimized_program)
+    code = files["kernels/aiv/debug_dump_tile_offset.cpp"]
+
+    assert "GetValidRow()" in code
+    assert "GetValidCol()" in code
+    assert "pto::GetTileOffset" in code
+    assert "pto::PrintValue(" in code
+    assert 'cce::printf("=== [TPRINT Tile Window]' in code
 
 
 if __name__ == "__main__":

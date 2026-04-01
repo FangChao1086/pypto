@@ -463,7 +463,7 @@ def test_pto_codegen_assert_lowering():
     codegen_obj = PTOCodegen()
     mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
 
-    assert mlir_code.count("arith.xori") == 2
+    assert mlir_code.count("arith.cmpi eq") >= 2
     assert mlir_code.count("scf.if") == 2
     assert "pto.print ins(\"[ASSERT] Assertion 'flag'\\n\", " in mlir_code
     assert "pto.print ins(\"[ASSERT] Assertion 'x > 0', x=%d\\n\", " in mlir_code
@@ -689,6 +689,132 @@ def test_pto_codegen_dump_tile_static_window_lowering():
     assert mlir_code.count("pto.tprint") == 1
     assert "pto.subset" in mlir_code
     assert "[%c4, %c0] sizes [8, 16]" in mlir_code
+
+
+def test_pto_codegen_dump_tensor_dynamic_shape_lowering():
+    """dump_tensor should lower dynamic shapes to partition views with dynamic result dims."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+    M = pl.DynVar("M")
+
+    @pl.program
+    class DumpDynamicShapeProgram:
+        @pl.function
+        def dump_dynamic_shape(
+            self,
+            input: pl.Tensor[[M, 32], pl.FP32],
+            output: pl.Tensor[[M, 32], pl.FP32],
+        ):
+            rows = pl.tensor.dim(input, 0)
+            plm.dump_tensor(input, offsets=[0, 0], shapes=[rows, 16])
+            tile = pl.load(input, offsets=[0, 0], shapes=[16, 16])
+            pl.store(tile, offsets=[0, 0], shapes=[16, 16], output_tensor=output)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(DumpDynamicShapeProgram)
+
+    codegen_obj = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+
+    assert "pto.partition_view" in mlir_code
+    assert "!pto.partition_tensor_view<?x16xf32>" in mlir_code
+    assert "sizes = [" in mlir_code
+
+
+def test_pto_codegen_dump_tensor_dynamic_window_lowering():
+    """dump_tensor should preserve dynamic offsets in partition_view lowering."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+    M = pl.DynVar("M")
+
+    @pl.program
+    class DumpDynamicWindowProgram:
+        @pl.function
+        def dump_dynamic_window(
+            self,
+            input: pl.Tensor[[M, 32], pl.FP32],
+            row_off: pl.Scalar[pl.INDEX],
+            output: pl.Tensor[[M, 32], pl.FP32],
+        ):
+            rows = pl.tensor.dim(input, 0)
+            plm.dump_tensor(input, offsets=[row_off, 0], shapes=[rows, 16])
+            tile = pl.load(input, offsets=[0, 0], shapes=[16, 16])
+            pl.store(tile, offsets=[0, 0], shapes=[16, 16], output_tensor=output)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(DumpDynamicWindowProgram)
+
+    codegen_obj = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+
+    assert "pto.partition_view" in mlir_code
+    assert "!pto.partition_tensor_view<?x16xf32>" in mlir_code
+    assert "offsets = [" in mlir_code
+
+
+def test_pto_codegen_dump_tile_dynamic_valid_shape_lowering():
+    """dump_tile full dumps should preserve dynamic valid-shape tile types."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class DumpDynamicTileProgram:
+        @pl.function
+        def dump_dynamic_tile(
+            self,
+            rows: pl.Scalar[pl.INDEX],
+            cols: pl.Scalar[pl.INDEX],
+            output: pl.Tensor[[16, 16], pl.FP32],
+        ):
+            tile_type = plm.TileType(
+                shape=[16, 16],
+                dtype=pl.FP32,
+                target_memory=pl.MemorySpace.Vec,
+                valid_shape=[-1, -1],
+            )
+            tile = plm.make_tile(tile_type, addr=0x0000, size=1024)
+            plm.set_validshape(tile, rows, cols)
+            plm.dump_tile(tile)
+            return output
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(DumpDynamicTileProgram)
+
+    codegen_obj = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+
+    assert "pto.set_validshape" in mlir_code
+    assert "pto.tprint ins(" in mlir_code
+    assert "v_row=?, v_col=?" in mlir_code
+
+
+def test_pto_codegen_dump_tile_dynamic_offset_lowering():
+    """dump_tile window lowering should accept dynamic offsets while keeping static sizes."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class DumpDynamicTileWindowProgram:
+        @pl.function
+        def dump_dynamic_tile_window(
+            self,
+            input: pl.Tensor[[32, 32], pl.FP32],
+            row_off: pl.Scalar[pl.INDEX],
+            output: pl.Tensor[[32, 32], pl.FP32],
+        ):
+            tile = pl.load(input, offsets=[0, 0], shapes=[16, 16])
+            plm.dump_tile(tile, offsets=[row_off, 0], shapes=[8, 16])
+            pl.store(tile, offsets=[0, 0], shapes=[16, 16], output_tensor=output)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(DumpDynamicTileWindowProgram)
+
+    codegen_obj = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+
+    assert "pto.subset" in mlir_code
+    assert "sizes [8, 16]" in mlir_code
+    assert "v_row=?, v_col=16" in mlir_code
 
 
 def test_pto_codegen_block_mul():
