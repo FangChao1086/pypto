@@ -107,12 +107,14 @@ class Tile(metaclass=TileMeta):
             self.dtype = dtype
             self.memref = memref
             self._expr = None
+            self._sync_type = None
         elif expr is not None:
             self._expr = expr
             self.shape = None
             self.dtype = None
             self.memref = None
             self._valid_shape = None  # (row_expr, col_expr) or None
+            self._sync_type = None
         else:
             raise ValueError(
                 "Tile must be initialized with either (shape, dtype) for "
@@ -137,6 +139,50 @@ class Tile(metaclass=TileMeta):
         """Support static type checkers for Tile[[shape], dtype] syntax."""
         return cls.__getitem__(item)
 
+    def lock(self, pipeline) -> None:
+        """Lock buffer before access (producer side).
+        
+        For A5 architecture: generates lock() operation
+        For A2A3 architecture: generates set() operation
+        
+        Args:
+            pipeline: Pipeline type for synchronization
+                       Supports both string ("PIPE_V") and enum (PipelineType.PIPE_V)
+        
+        Example:
+            buf.lock(PipelineType.PIPE_MTE2)
+            plm.load(buf, tensor, [0, 0])
+        """
+        from pypto.language.manual import sync as _sync
+        from pypto.language.manual.buffer_policy import PipelineType as _PipelineType
+        
+        if isinstance(pipeline, _PipelineType):
+            pipeline = pipeline.value
+        
+        _sync.buffer_lock(self.unwrap(), pipeline)
+    
+    def free(self, pipeline) -> None:
+        """Free buffer after use (consumer side).
+        
+        For A5 architecture: generates free() operation
+        For A2A3 architecture: generates wait() operation
+        
+        Args:
+            pipeline: Pipeline type for synchronization
+                       Supports both string ("PIPE_V") and enum (PipelineType.PIPE_V)
+        
+        Example:
+            plm.load(buf, tensor, [0, 0])
+            buf.free(PipelineType.PIPE_MTE2)
+        """
+        from pypto.language.manual import sync as _sync
+        from pypto.language.manual.buffer_policy import PipelineType as _PipelineType
+        
+        if isinstance(pipeline, _PipelineType):
+            pipeline = pipeline.value
+        
+        _sync.buffer_free(self.unwrap(), pipeline)
+    
     def __repr__(self) -> str:
         """String representation."""
         if self._expr is not None:

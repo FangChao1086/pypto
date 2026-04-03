@@ -17,6 +17,7 @@ forward and bidirectional modes.
 from typing import Any, Optional, Union
 
 from pypto.pypto_core import ir as _ir_core
+from pypto.pypto_core.ir import Expr
 
 from .buffer_policy import SyncType, PipelineType
 
@@ -200,8 +201,55 @@ def _extract_int_value(value: Any) -> int:
         raise TypeError(f"event_id must be int or ConstInt, got {type(value).__name__}")
 
 
+def buffer_lock(tile_expr: Expr, pipeline: Union[str, "PipelineType"]) -> None:
+    """Lock buffer before access.
+    
+    This is producer-side operation that locks buffer before writing.
+    - A5: generates ubBufSync.lock()
+    - A2A3: generates TSync_Custom::allocate() (set operation)
+    
+    Args:
+        tile_expr: Tile expression to lock
+        pipeline: Pipeline type for synchronization
+    
+    Example:
+        buf.lock(PipelineType.PIPE_MTE2)
+        plm.load(buf, tensor, [0, 0])
+    """
+    from .buffer_policy import PipelineType as _PipelineType
+    if isinstance(pipeline, _PipelineType):
+        pipeline = pipeline.value
+    
+    _sync_op(SyncType.INNER_CORE_SYNC, pipeline=str(pipeline), 
+              tile=tile_expr, direction="lock")
+
+
+def buffer_free(tile_expr: Expr, pipeline: Union[str, "PipelineType"]) -> None:
+    """Free buffer after use.
+    
+    This is consumer-side operation that signals buffer is available.
+    - A5: generates ubBufSync.free()
+    - A2A3: generates TSync_Custom::free() (wait operation)
+    
+    Args:
+        tile_expr: Tile expression to free
+        pipeline: Pipeline type for synchronization
+    
+    Example:
+        plm.load(buf, tensor, [0, 0])
+        buf.free(PipelineType.PIPE_MTE2)
+    """
+    from .buffer_policy import PipelineType as _PipelineType
+    if isinstance(pipeline, _PipelineType):
+        pipeline = pipeline.value
+    
+    _sync_op(SyncType.INNER_CORE_SYNC, pipeline=str(pipeline), 
+              tile=tile_expr, direction="free")
+
+
 def _sync_op(sync_type: SyncType, event_id: int = 0, 
-            direction: Optional[str] = None, pipeline: Optional[str] = None):
+            direction: Optional[str] = None, pipeline: Optional[str] = None,
+            tile: Optional[Expr] = None):
     """Internal sync operation that generates pto.sync MLIR.
     
     Args:
@@ -209,6 +257,7 @@ def _sync_op(sync_type: SyncType, event_id: int = 0,
         event_id: Event identifier (int or ir.Expr.ConstInt)
         direction: Optional direction ("allocate" or "record")
         pipeline: Optional pipeline type for fine-grained sync
+        tile: Optional tile expression for buffer-level sync
     """
     event_id_value = _extract_int_value(event_id)
     
@@ -220,6 +269,8 @@ def _sync_op(sync_type: SyncType, event_id: int = 0,
         kwargs["direction"] = direction
     if pipeline is not None:
         kwargs["pipeline"] = pipeline
+    if tile is not None:
+        kwargs["tile"] = tile
     
     _ir_core.create_op_call("manual.sync", [], kwargs, _ir_core.Span.unknown())
 
@@ -257,4 +308,6 @@ __all__ = [
     "wait_data_ready",
     "PipelineType",
     "sync_pipeline",
+    "buffer_lock",
+    "buffer_free",
 ]

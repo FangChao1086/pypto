@@ -45,9 +45,9 @@ def test_double_buffer_kernel(
     a: pl.Tensor[[256, 128], pl.FP16],
     b: pl.Tensor[[256, 128], pl.FP16],
 ) -> pl.Tensor[[256, 128], pl.FP16]:
-    """Test double buffer policy with inner-core synchronization.
+    """Test double buffer policy with buffer-level synchronization.
     
-    This test validates the complete doublebuffer pattern following ops-transformer:
+    This test validates the complete doublebuffer pattern using buffer lock/free:
     - Ping-pong buffer rotation across multiple iterations
     - Fine-grained pipeline synchronization (PIPE_MTE2 and PIPE_V)
     - Overlapping data transfer and computation
@@ -70,41 +70,43 @@ def test_double_buffer_kernel(
         
         # Preload first buffer
         buf_curr = policy.get()
+        buf_curr.lock(PipelineType.PIPE_MTE2)
         plm.load(buf_curr, a, [0, 0])
-        policy.sync_inner(PipelineType.PIPE_MTE2)
+        buf_curr.free(PipelineType.PIPE_MTE2)
         
         # Main loop: overlap load and compute
         for i in pl.range(3):
             # Get next buffer and preload data (overlap with current buffer's compute)
             buf_next = policy.get()
+            buf_next.lock(PipelineType.PIPE_MTE2)
             plm.load(buf_next, a, [(i + 1) * 64, 0])
-            policy.sync_inner(PipelineType.PIPE_MTE2)
+            buf_next.free(PipelineType.PIPE_MTE2)
             
             # Compute on current buffer (overlaps with next buffer's load)
             plm.add(buf_curr, buf_curr, buf_curr)
-            policy.sync_inner(PipelineType.PIPE_V)
-            
-            # Store result from current buffer
+            buf_curr.lock(PipelineType.PIPE_V)
             plm.store(b, buf_curr, [i * 64, 0])
+            buf_curr.free(PipelineType.PIPE_V)
             
             # Swap buffers
             buf_curr = buf_next
         
         # Process last buffer
         plm.add(buf_curr, buf_curr, buf_curr)
-        policy.sync_inner(PipelineType.PIPE_V)
+        buf_curr.lock(PipelineType.PIPE_V)
         plm.store(b, buf_curr, [3 * 64, 0])
+        buf_curr.free(PipelineType.PIPE_V)
     
     return b
 
 
 def test_double_buffer_policy():
-    """Test BuffersPolicyDB with inner-core synchronization.
+    """Test BuffersPolicyDB with buffer-level synchronization.
     
     Validates:
     - Double buffer allocation (ping and pong)
     - Ping-pong rotation across multiple iterations
-    - Fine-grained pipeline synchronization
+    - Fine-grained pipeline synchronization using lock/free
     - Proper MLIR generation for doublebuffer operations
     """
     from pypto.language.manual.buffer_policy import EventIdGenerator
@@ -133,11 +135,17 @@ def test_double_buffer_policy():
     # 验证循环范围是 3 次迭代（主循环）
     assert "to %c3" in mlir, "Expected loop to iterate 3 times"
     
-    # 验证细粒度同步（在循环体内各出现1次）
-    assert "pto.barrier_sync [#pto<pipe PIPE_MTE2>]" in mlir, \
-        "Expected PIPE_MTE2 sync in loop body"
-    assert "pto.barrier_sync [#pto<pipe PIPE_V>]" in mlir, \
-        "Expected PIPE_V sync in loop body"
+    # 验证 buffer lock/free 同步
+    assert "manual.sync" in mlir, \
+        "Expected manual.sync for buffer lock/free"
+    assert '"direction": "lock"' in mlir, \
+        "Expected lock direction in sync"
+    assert '"direction": "free"' in mlir, \
+        "Expected free direction in sync"
+    assert "#pto<pipe PIPE_MTE2>" in mlir, \
+        "Expected PIPE_MTE2 in sync"
+    assert "#pto<pipe PIPE_V>" in mlir, \
+        "Expected PIPE_V in sync"
 
 # ---------------------------------------------------------------------------
 # Test Case 2: Triple Buffer Policy (BuffersPolicy3buff)
