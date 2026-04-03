@@ -149,5 +149,18 @@ REGISTER_OP("system.sync_all")
     .set_attr<int>("wait_pipe")
     .f_deduce_type(DeduceUnknownType);
 
+// Register manual.sync (Manual synchronization for buffer management)
+// Arguments: tile (optional, for buffer-level sync)
+// Attributes: sync_type, event_id, direction (optional), pipeline (optional)
+REGISTER_OP("manual.sync")
+    .set_description("Manual synchronization operation for buffer management in FlashAttention")
+    .set_op_category("ManualOp")
+    .add_argument("tile", "Optional tile expression for buffer-level sync (TileType, optional)")
+    .set_attr<std::string>("sync_type")
+    .set_attr<int>("event_id")
+    .set_attr<std::string>("direction")
+    .set_attr<std::string>("pipeline")
+    .f_deduce_type(DeduceUnknownType);
+
 }  // namespace ir
 }  // namespace pypto

@@ -17,6 +17,7 @@ from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
 from pypto.pypto_core import DataType, ir
 from pypto.pypto_core.ir import MemorySpace, PipeType
+from ..manual.buffer_policy import SyncType, PipelineType
 
 _MEMORY_SPACE_MAP: dict[str, MemorySpace] = {
     "Left": MemorySpace.Left,
@@ -24,6 +25,30 @@ _MEMORY_SPACE_MAP: dict[str, MemorySpace] = {
     "Vec": MemorySpace.Vec,
     "Mat": MemorySpace.Mat,
     "Acc": MemorySpace.Acc,
+}
+
+_SYNC_TYPE_MAP: dict[str, SyncType] = {
+    "NO_SYNC": SyncType.NO_SYNC,
+    "INNER_CORE_SYNC": SyncType.INNER_CORE_SYNC,
+    "CROSS_CORE_SYNC_FORWARD": SyncType.CROSS_CORE_SYNC_FORWARD,
+    "CROSS_CORE_SYNC_BOTH": SyncType.CROSS_CORE_SYNC_BOTH,
+}
+
+_PIPELINE_TYPE_MAP: dict[str, PipelineType] = {
+    "PIPE_V": PipelineType.PIPE_V,
+    "PIPE_M": PipelineType.PIPE_M,
+    "PIPE_FIX": PipelineType.PIPE_FIX,
+    "PIPE_MTE1": PipelineType.PIPE_MTE1,
+    "PIPE_MTE2": PipelineType.PIPE_MTE2,
+    "PIPE_MTE3": PipelineType.PIPE_MTE3,
+    "PIPE_ALL": PipelineType.PIPE_ALL,
+}
+
+_BUFFER_POLICIES: set[str] = {
+    "BuffersPolicyDB",
+    "BuffersPolicy3buff",
+    "BuffersPolicy4buff",
+    "BuffersPolicySingleBuffer",
 }
 
 from .diagnostics import (
@@ -555,6 +580,11 @@ class ASTParser:
                     if isinstance(func, ast.Attribute) and func.attr == "TileType":
                         tile_type = self._parse_tile_type_call(stmt.value)
                         self.scope_manager.define_python_var(var_name, tile_type, span=span)
+                        return
+                    # plm.BuffersPolicyDB(...), plm.BuffersPolicy3buff(...), etc.
+                    if isinstance(func, ast.Attribute) and func.attr in _BUFFER_POLICIES:
+                        policy_obj = self._parse_buffer_policy_call(func.attr, stmt.value)
+                        self.scope_manager.define_python_var(var_name, policy_obj, span=span)
                         return
                     # pl.struct(field1=val1, field2=val2, ...)
                     if isinstance(func, ast.Attribute) and func.attr == "struct":
@@ -2113,6 +2143,38 @@ class ASTParser:
                         hint=f"Available functions: {list(self.global_vars.keys())}",
                     )
 
+            # Handle Python object method calls (e.g., policy.get(), buf.lock())
+            if isinstance(func.value, ast.Name):
+                obj_name = func.value.id
+                python_obj = self.scope_manager.get_python_var(obj_name)
+                
+                # Special handling for Tile lock/free methods - these need to be evaluated
+                # even if python_obj is None (might be IR variable wrapping a Tile)
+                is_tile_method = func.attr in ('lock', 'free')
+                
+                if python_obj is not None or is_tile_method:
+                    # 对于 lock/free 方法，如果 python_obj 为 None，尝试从 IR 作用域查找
+                    if is_tile_method and python_obj is None:
+                        ir_var = self.scope_manager.lookup_var(obj_name)
+                        if ir_var is not None:
+                            # 创建一个临时的 Tile 对象包装这个 IR 变量
+                            from ..typing.tile import Tile
+                            python_obj = Tile(expr=ir_var)
+                    
+                    if python_obj is not None:
+                        # 解析方法参数
+                        args = [self.parse_expression(arg) for arg in call.args]
+                        
+                        # 调用方法
+                        method = getattr(python_obj, func.attr)
+                        result = method(*args)
+                        
+                        # 对于 lock/free 方法（返回 None），返回一个占位符表达式
+                        if is_tile_method:
+                            span = self.span_tracker.get_span(call)
+                            return ir.ConstInt(0, DataType.INDEX, span)
+                        return result
+
             # Handle pl.tensor.*, pl.block.*, and pl.* operation calls
             return self.parse_op_call(call)
 
@@ -2226,9 +2288,15 @@ class ASTParser:
         if len(attrs) >= 2 and attrs[0] in ("pl", "plm") and attrs[1] == "const":
             return self._parse_typed_constant(call)
         
+               
+        
         # plm.TileType(...) - type descriptor, not an operation
         if len(attrs) == 2 and attrs[0] == "plm" and attrs[1] == "TileType":
             return self._parse_tile_type_call(call)
+
+        # plm.{BufferPolicy}(...) - buffer policy instantiation, not an operation
+        if len(attrs) == 2 and attrs[0] == "plm" and attrs[1] in _BUFFER_POLICIES:
+            return self._parse_buffer_policy_call(attrs[1], call)
 
         # plm.{operation} (2-segment) — manual (non-SSA) ops
         if len(attrs) == 2 and attrs[0] == "plm" and attrs[1] != "const":
@@ -2665,6 +2733,74 @@ class ASTParser:
             else:
                 fields[kw.arg] = value_expr
         return _StructVar(fields, name=struct_name)
+    def _parse_buffer_policy_call(self, policy_name: str, call: ast.Call) -> Any:
+        """Parse buffer policy instantiation (BuffersPolicyDB, BuffersPolicy3buff, etc.).
+        
+        Buffer policies are Python classes that manage buffer allocation and synchronization.
+        They are not IR operations and should be instantiated directly as Python objects.
+        
+        Args:
+            policy_name: Name of the buffer policy class (e.g., "BuffersPolicyDB")
+            call: Call AST node
+            
+        Returns:
+            Instantiated buffer policy object
+            
+        Example:
+            policy = plm.BuffersPolicyDB(tile_type, MemorySpace.Vec, SyncType.INNER_CORE_SYNC)
+            # Returns: BuffersPolicyDB instance
+        """
+        from pypto.language.manual.buffer_policy import (
+            BuffersPolicyDB,
+            BuffersPolicy3buff,
+            BuffersPolicy4buff,
+            BuffersPolicySingleBuffer,
+        )
+        
+        policy_classes = {
+            "BuffersPolicyDB": BuffersPolicyDB,
+            "BuffersPolicy3buff": BuffersPolicy3buff,
+            "BuffersPolicy4buff": BuffersPolicy4buff,
+            "BuffersPolicySingleBuffer": BuffersPolicySingleBuffer,
+        }
+        
+        policy_class = policy_classes[policy_name]
+        
+        args = []
+        for arg in call.args:
+            if isinstance(arg, ast.Name):
+                py_var = self.scope_manager.get_python_var(arg.id)
+                if py_var is not None:
+                    args.append(py_var)
+                else:
+                    args.append(self.parse_expression(arg))
+            else:
+                if isinstance(arg, ast.Constant):
+                    args.append(arg.value)
+                else:
+                    args.append(self.parse_expression(arg))
+        
+        kwargs = {}
+        for kw in call.keywords:
+            if kw.arg is None:
+                raise ParserSyntaxError(
+                    "BufferPolicy does not support **kwargs",
+                    span=self.span_tracker.get_span(kw.value),
+                )
+            if isinstance(kw.value, ast.Name):
+                py_var = self.scope_manager.get_python_var(kw.value.id)
+                if py_var is not None:
+                    kwargs[kw.arg] = py_var
+                else:
+                    kwargs[kw.arg] = self._resolve_single_kwarg(kw.arg, kw.value)
+            elif isinstance(kw.value, ast.Attribute):
+                kwargs[kw.arg] = self._resolve_attribute_kwarg(kw.value)
+            elif isinstance(kw.value, ast.Constant):
+                kwargs[kw.arg] = kw.value.value
+            else:
+                kwargs[kw.arg] = self._resolve_single_kwarg(kw.arg, kw.value)
+        
+        return policy_class(*args, **kwargs)
 
     def _parse_op_kwargs(self, call: ast.Call) -> dict[str, Any]:
         """Parse keyword arguments for an operation call.
@@ -3013,6 +3149,7 @@ class ASTParser:
 
         args = [self.parse_expression(arg) for arg in call.args]
         kwargs = self._parse_op_kwargs(call)
+
         # Dispatch to ir_op.manual.<op_name> when a handler exists.
         if hasattr(ir_op.manual, op_name):
             op_func = getattr(ir_op.manual, op_name)
@@ -3726,14 +3863,14 @@ class ASTParser:
             hint="Supported scalar ops: min, max, index_cast",
         )
 
-    def parse_attribute(self, attr: ast.Attribute) -> ir.Expr:
+    def parse_attribute(self, attr: ast.Attribute) -> ir.Expr | Any:
         """Parse attribute access.
 
         Args:
             attr: Attribute AST node
 
         Returns:
-            IR expression
+            IR expression or Python value (e.g., string for SyncType)
         """
         span = self.span_tracker.get_span(attr)
         if isinstance(attr.value, ast.Name):
@@ -3788,6 +3925,12 @@ class ASTParser:
             # Check for pl.MemorySpace.* attribute access (nested: pl.MemorySpace.Left)
             if obj_name == "pl" and field_name in _MEMORY_SPACE_MAP:
                 return ir.ConstInt(_MEMORY_SPACE_MAP[field_name].value, DataType.INT64, span)
+            # Check for SyncType.* attribute access
+            if obj_name == "SyncType" and field_name in _SYNC_TYPE_MAP:
+                return _SYNC_TYPE_MAP[field_name]  # 返回枚举对象
+            # Check for PipelineType.* attribute access
+            if obj_name == "PipelineType" and field_name in _PIPELINE_TYPE_MAP:
+                return _PIPELINE_TYPE_MAP[field_name]  # 返回枚举对象
         # Check for nested attribute access like pl.MemorySpace.Left
         if isinstance(attr.value, ast.Attribute):
             inner_attr = attr.value

@@ -1617,6 +1617,74 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "manual.set_validshape")
       // Update tile→valid_shape mapping so load/store can retrieve it
       c.UpdateTileValidShape(tile_buf, row, col);
       return "";
+      });
+// ----------------------------------------------------------------------------
+// Synchronization
+// ----------------------------------------------------------------------------
+
+static std::string MakeManualSyncPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  
+  const std::string& sync_type = op->GetKwarg<std::string>("sync_type");
+  
+  std::ostringstream oss;
+  
+  if (sync_type == "inner_core_sync") {
+    // 检查是否有direction参数（用于buffer lock/free）
+    if (op->HasKwarg("direction")) {
+      const std::string& direction = op->GetKwarg<std::string>("direction");
+      const std::string& pipeline = op->GetKwarg<std::string>("pipeline");
+      
+      // 获取tile参数（buffer表达式）
+      std::string tile = "";
+      if (!op->args_.empty()) {
+        tile = codegen.GetExprAsCode(op->args_[0]);
+      }
+      
+      if (direction == "lock") {
+        oss << "pto.ub_buf_sync ins(" << tile << ") outs() attr {\"direction\": \"lock\", \"pipeline\": \"" << pipeline << "\"}";
+      } else if (direction == "free") {
+        oss << "pto.ub_buf_sync ins(" << tile << ") outs() attr {\"direction\": \"free\", \"pipeline\": \"" << pipeline << "\"}";
+      } else {
+        LOG_ERROR << "manual.sync: unknown direction '" << direction << "'";
+        return "";
+      }
+    } else if (op->HasKwarg("pipeline")) {
+      // 原有的pipeline同步逻辑
+      const std::string& pipeline = op->GetKwarg<std::string>("pipeline");
+      oss << "pto.barrier_sync [#pto<pipe " << pipeline << ">]";
+    } else {
+      // 向后兼容：无pipeline参数，默认PIPE_ALL
+      oss << "pto.barrier_sync [#pto<pipe PIPE_ALL>]";
+    }
+  } else if (sync_type == "cross_core_sync_forward") {
+    int event_id = op->GetKwarg<int>("event_id");
+    oss << "pto.record_event [#pto<sync_op_type TMATMUL>, #pto<sync_op_type TVEC>, #pto<event EVENT_ID" << event_id << ">]";
+  } else if (sync_type == "cross_core_sync_both") {
+    int event_id = op->GetKwarg<int>("event_id");
+    const std::string& direction = op->GetKwarg<std::string>("direction");
+    
+    if (direction == "record") {
+      oss << "pto.record_event [#pto<sync_op_type TMATMUL>, #pto<sync_op_type TVEC>, #pto<event EVENT_ID" << event_id << ">]";
+    } else if (direction == "allocate") {
+      oss << "pto.wait_event [#pto<sync_op_type TMATMUL>, #pto<sync_op_type TVEC>, #pto<event EVENT_ID" << event_id << ">]";
+    } else {
+      LOG_ERROR << "manual.sync: unknown direction '" << direction << "'";
+      return "";
+    }
+  } else {
+    LOG_ERROR << "manual.sync: unknown sync_type '" << sync_type << "'";
+    return "";
+  }
+  
+  codegen.Emit(oss.str());
+  return "";
+}
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "manual.sync")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualSyncPTO(op, codegen);
     });
 
 // ----------------------------------------------------------------------------

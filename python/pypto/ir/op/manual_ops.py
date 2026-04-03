@@ -269,3 +269,52 @@ def store_tile(
     return _ir_core.create_op_call(
         "manual.store", [tile, offsets_tuple, out], kwargs, actual_span
     )
+
+
+def sync(
+    tile: Expr | None = None,
+    *,
+    sync_type: str,
+    event_id: int = 0,
+    direction: str | None = None,
+    pipeline: str | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Build manual.sync IR call for buffer synchronization.
+
+    This is used for buffer lock/free operations in FlashAttention patterns.
+    Supports different synchronization types and fine-grained pipeline control.
+
+    Args:
+        tile: Optional tile expression for buffer-level sync
+        sync_type: Type of synchronization ("inner_core_sync", "cross_core_sync_forward", etc.)
+        event_id: Event identifier for cross-core sync
+        direction: Optional direction ("lock", "free", "allocate", "record")
+        pipeline: Optional pipeline type for fine-grained sync
+        span: Optional source span
+
+    Returns:
+        Call expression for manual.sync
+
+    Examples:
+        # Buffer lock for MTE2 pipeline
+        sync(tile=buf, sync_type="inner_core_sync", direction="lock", pipeline="PIPE_MTE2")
+
+        # Buffer free for V pipeline
+        sync(tile=buf, sync_type="inner_core_sync", direction="free", pipeline="PIPE_V")
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs = {
+        "sync_type": sync_type,
+        "event_id": event_id,
+    }
+    if direction is not None:
+        kwargs["direction"] = direction
+    if pipeline is not None:
+        kwargs["pipeline"] = pipeline
+
+    args = []
+    if tile is not None:
+        args.append(tile)
+
+    return _ir_core.create_op_call("manual.sync", args, kwargs, actual_span)

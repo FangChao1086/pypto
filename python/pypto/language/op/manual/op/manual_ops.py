@@ -35,7 +35,7 @@ from typing import Literal, Optional, Sequence, Union
 from dataclasses import dataclass
 from pypto.ir.op import block_ops as _ir_block_ops
 from pypto.ir.op import manual_ops as _ir_manual
-from pypto.ir.utils import _to_make_tuple
+from pypto.ir.utils import _to_make_tuple, _normalize_expr
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Expr, MemorySpace, Span
@@ -687,7 +687,12 @@ def gatherb(src: Tile, offsets: Tile, out: Tile) -> None:
 # ---------------------------------------------------------------------------
 
 def _scalar_expr(v: int | float | Expr | Scalar) -> Expr:
-    return v.unwrap() if isinstance(v, Scalar) else v
+    if isinstance(v, Scalar):
+        return v.unwrap()
+    elif isinstance(v, (int, float)):
+        return _normalize_expr(v)
+    else:
+        return v
 
 
 def adds(lhs: Tile, rhs: int | float | Expr | Scalar, out: Tile) -> None:
