@@ -327,6 +327,10 @@ static std::string MakeManualFillPadPTO(const CallPtr& op, codegen::CodegenBase&
   return MakeManualUnaryPTO("pto.tfillpad", op, cb);
 }
 
+static std::string MakeManualFillPadExpandPTO(const CallPtr& op, codegen::CodegenBase& cb) {
+  return MakeManualUnaryPTO("pto.tfillpad_expand", op, cb);
+}
+
 // Binary: (lhs, rhs, out)
 static std::string MakeManualBinaryPTO(const std::string& pto_op, const CallPtr& op,
                                        codegen::CodegenBase& cb) {
@@ -1029,6 +1033,12 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "manual.fillpad")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeManualFillPadPTO(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "manual.fillpad_expand")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualFillPadExpandPTO(op, codegen);
     });
 
 // ----------------------------------------------------------------------------

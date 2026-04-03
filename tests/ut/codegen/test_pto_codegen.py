@@ -833,6 +833,52 @@ def test_pto_codegen_manual_fillpad_updates_pad_and_valid_shape():
     assert "v_row=16, v_col=16" in mlir_code
 
 
+def test_pto_codegen_manual_fillpad_expand_uses_expand_op():
+    """plm.fillpad_expand should lower to pto.tfillpad_expand using the destination tile metadata."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class ManualFillPadExpandProgram:
+        @pl.function
+        def fillpad_expand_dynamic_tile(
+            self,
+            rows: pl.Scalar[pl.INDEX],
+            cols: pl.Scalar[pl.INDEX],
+            output: pl.Tensor[[16, 32], pl.FP32],
+        ):
+            src_type = plm.TileType(
+                shape=[16, 16],
+                dtype=pl.FP32,
+                target_memory=pl.MemorySpace.Vec,
+                valid_shape=[-1, -1],
+            )
+            dst_type = plm.TileType(
+                shape=[16, 32],
+                dtype=pl.FP32,
+                target_memory=pl.MemorySpace.Vec,
+                pad=plm.TilePad.zero,
+            )
+            src = plm.make_tile(src_type, addr=0x0000, size=1024)
+            dst = plm.make_tile(dst_type, addr=0x1000, size=2048)
+            plm.set_validshape(src, rows, cols)
+            plm.fillpad_expand(dst, src)
+            plm.dump_tile(dst)
+            return output
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(ManualFillPadExpandProgram)
+
+    codegen_obj = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+
+    assert "pto.set_validshape" in mlir_code
+    assert "pto.tfillpad_expand ins(" in mlir_code
+    assert "pad=1" in mlir_code
+    assert "rows=16, cols=32" in mlir_code
+    assert "v_row=16, v_col=32" in mlir_code
+
+
 def test_manual_fillpad_rejects_invalid_pad_modes():
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.PTO)
@@ -880,6 +926,61 @@ def test_manual_fillpad_rejects_invalid_pad_modes():
                 src = plm.make_tile(src_type, addr=0x0000, size=1024)
                 dst = plm.make_tile(dst_type, addr=0x1000, size=1024)
                 plm.fillpad(dst, src)
+                return output
+
+
+def test_manual_fillpad_expand_rejects_invalid_shape_and_pad():
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    with pytest.raises(ValueError, match="manual.fillpad_expand: out.tile_view.pad must not be TilePad.null"):
+        @pl.program
+        class InvalidFillPadExpandNullProgram:
+            @pl.function
+            def invalid_fillpad_expand_null(
+                self,
+                output: pl.Tensor[[16, 32], pl.FP32],
+            ):
+                src_type = plm.TileType(
+                    shape=[16, 16],
+                    dtype=pl.FP32,
+                    target_memory=pl.MemorySpace.Vec,
+                    valid_shape=[-1, -1],
+                )
+                dst_type = plm.TileType(
+                    shape=[16, 32],
+                    dtype=pl.FP32,
+                    target_memory=pl.MemorySpace.Vec,
+                    pad=plm.TilePad.null,
+                )
+                src = plm.make_tile(src_type, addr=0x0000, size=1024)
+                dst = plm.make_tile(dst_type, addr=0x1000, size=2048)
+                plm.fillpad_expand(dst, src)
+                return output
+
+    with pytest.raises(ValueError, match="manual.fillpad_expand: out tile rows/cols must be >= src tile rows/cols"):
+        @pl.program
+        class InvalidFillPadExpandShapeProgram:
+            @pl.function
+            def invalid_fillpad_expand_shape(
+                self,
+                output: pl.Tensor[[16, 8], pl.FP32],
+            ):
+                src_type = plm.TileType(
+                    shape=[16, 16],
+                    dtype=pl.FP32,
+                    target_memory=pl.MemorySpace.Vec,
+                    valid_shape=[-1, -1],
+                )
+                dst_type = plm.TileType(
+                    shape=[16, 8],
+                    dtype=pl.FP32,
+                    target_memory=pl.MemorySpace.Vec,
+                    pad=plm.TilePad.zero,
+                )
+                src = plm.make_tile(src_type, addr=0x0000, size=1024)
+                dst = plm.make_tile(dst_type, addr=0x1000, size=512)
+                plm.fillpad_expand(dst, src)
                 return output
 
 

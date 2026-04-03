@@ -11,7 +11,7 @@
 
 /**
  * @file manual_ops/memory.cpp
- * @brief Manual (non-SSA) memory operations: load, move, ub_copy, full, fillpad.
+ * @brief Manual (non-SSA) memory operations: load, move, ub_copy, full, fillpad, fillpad_expand.
  *
  * Each "manual" op receives the pre-allocated output tile as its last argument
  * and returns that tile's type rather than creating a fresh SSA result type.
@@ -56,18 +56,35 @@ static TypePtr DeduceManualOutTileType(const std::vector<ExprPtr>& args,
 }
 
 static TypePtr DeduceManualFillPadType(const std::vector<ExprPtr>& args,
-                                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  auto out_type = As<TileType>(DeduceManualOutTileType(args, kwargs, "manual.fillpad", 2));
-  CHECK(out_type) << "manual.fillpad: out must be TileType";
+                                       const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                       const std::string& op_name, bool allow_expand) {
+  auto out_type = As<TileType>(DeduceManualOutTileType(args, kwargs, op_name, 2));
+  CHECK(out_type) << op_name << ": out must be TileType";
+  auto src_type = As<TileType>(args[0]->GetType());
+  CHECK(src_type) << op_name << ": src must be TileType";
   CHECK(out_type->tile_view_.has_value())
-      << "manual.fillpad: out tile must carry tile_view metadata";
+      << op_name << ": out tile must carry tile_view metadata";
 
   TileView view = out_type->tile_view_.value();
   int pad_value = static_cast<int>(view.pad);
   CHECK(pad_value >= static_cast<int>(TilePad::null) && pad_value <= static_cast<int>(TilePad::min))
-      << "manual.fillpad: out.tile_view.pad must be one of TilePad.null/zero/max/min";
+      << op_name << ": out.tile_view.pad must be one of TilePad.null/zero/max/min";
   CHECK(pad_value != static_cast<int>(TilePad::null))
-      << "manual.fillpad: out.tile_view.pad must not be TilePad.null";
+      << op_name << ": out.tile_view.pad must not be TilePad.null";
+
+  if (allow_expand) {
+    CHECK(src_type->shape_.size() == 2 && out_type->shape_.size() == 2)
+        << op_name << ": src/out tile shapes must be rank-2";
+
+    auto src_rows = As<ConstInt>(src_type->shape_[0]);
+    auto src_cols = As<ConstInt>(src_type->shape_[1]);
+    auto out_rows = As<ConstInt>(out_type->shape_[0]);
+    auto out_cols = As<ConstInt>(out_type->shape_[1]);
+    CHECK(src_rows && src_cols && out_rows && out_cols)
+        << op_name << ": src/out tile shapes must be static";
+    CHECK(out_rows->value_ >= src_rows->value_ && out_cols->value_ >= src_cols->value_)
+        << op_name << ": out tile rows/cols must be >= src tile rows/cols";
+  }
   return out_type;
 }
 
@@ -189,7 +206,19 @@ REGISTER_OP("manual.fillpad")
     .add_argument("out", "Pre-allocated destination tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceManualFillPadType(args, kwargs);
+      return DeduceManualFillPadType(args, kwargs, "manual.fillpad", false);
+    });
+
+// manual.fillpad_expand: (src_tile, out) -> TileType (out's type)
+REGISTER_OP("manual.fillpad_expand")
+    .set_op_category("ManualOp")
+    .set_description(
+        "Manual fill-with-padding: copy src tile into a larger out tile and pad remaining elements.")
+    .add_argument("src", "Source tile (TileType)")
+    .add_argument("out", "Pre-allocated destination tile (TileType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceManualFillPadType(args, kwargs, "manual.fillpad_expand", true);
     });
 
 // manual.set_validshape: (row, col, tile) -> TileType (tile's type)

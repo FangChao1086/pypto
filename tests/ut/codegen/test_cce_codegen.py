@@ -134,6 +134,52 @@ def test_manual_fillpad_codegen_uses_destination_pad_value():
     assert "Tile<TileType::Vec, float, 16, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Zero>" in code
 
 
+def test_manual_fillpad_expand_codegen_uses_destination_pad_value():
+    """CCE manual.fillpad_expand should lower to TFILLPAD_EXPAND with dst TilePad encoded in the tile type."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.CCE)
+
+    @pl.program
+    class ManualFillPadExpandCCEProgram:
+        @pl.function
+        def fillpad_expand_dynamic_tile(
+            self,
+            input: pl.Tensor[[16, 16], pl.FP32],
+            output: pl.Tensor[[16, 32], pl.FP32],
+            rows_arg: pl.Scalar[pl.INDEX],
+            cols_arg: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            src_type = plm.TileType(
+                shape=[16, 16],
+                dtype=pl.FP32,
+                target_memory=pl.MemorySpace.Vec,
+                valid_shape=[-1, -1],
+            )
+            dst_type = plm.TileType(
+                shape=[16, 32],
+                dtype=pl.FP32,
+                target_memory=pl.MemorySpace.Vec,
+                pad=plm.TilePad.zero,
+            )
+            src = plm.make_tile(src_type, addr=0x0000, size=1024)
+            dst = plm.make_tile(dst_type, addr=0x1000, size=2048)
+            plm.set_validshape(src, rows_arg, cols_arg)
+            plm.fillpad_expand(dst, src)
+            return output
+
+    pm = PassManager.get_strategy()
+    optimized_program = pm.run_passes(ManualFillPadExpandCCEProgram)
+
+    generator = codegen.CCECodegen()
+    files = generator.generate(optimized_program)
+    kernel_name = list(optimized_program.functions.values())[0].name
+    code = files["kernels/aiv/" + kernel_name + ".cpp"]
+
+    assert "TFILLPAD_EXPAND(" in code
+    assert "PadValue::Zero" in code
+    assert "Tile<TileType::Vec, float, 16, 32, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Zero>" in code
+
+
 class TestControlFlowCodegen:
     """Test control flow statement code generation."""
 

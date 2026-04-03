@@ -367,6 +367,11 @@ static std::string MakeManualFillpadCodegenCCE(const ir::CallPtr& op, codegen::C
   return MakeManualUnaryCodegenCCE("TFILLPAD", op, codegen_base);
 }
 
+// manual.fillpad_expand — args = [src, dst]
+static std::string MakeManualFillpadExpandCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  return MakeManualUnaryCodegenCCE("TFILLPAD_EXPAND", op, codegen_base);
+}
+
 // manual.reshape — args = [src, shape, dst]
 static std::string MakeManualReshapeCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
@@ -680,6 +685,12 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "manual.fillpad")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeManualFillpadCodegenCCE(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.fillpad_expand")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualFillpadExpandCodegenCCE(op, codegen);
     });
 
 // ============================================================================

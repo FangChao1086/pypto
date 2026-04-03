@@ -62,7 +62,7 @@ def dump_tensor_dynamic_add_kernel(
 
 @fe.jit()
 def test_dump_tensor_dynamic():
-    compiled_lib = fe.compile(dump_tensor_dynamic_add_kernel, arch="a3", codegen_mode="cce")
+    compiled_lib = fe.compile(dump_tensor_dynamic_add_kernel, arch="a3")
     print("compiled lib path:", compiled_lib.lib_path)
 
     device = "npu:0"

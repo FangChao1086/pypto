@@ -102,6 +102,7 @@ _OP_TO_PIPE: dict[str, PipeType] = {
     "ub_copy": PipeType.V,
     "full": PipeType.V,
     "fillpad": PipeType.V,
+    "fillpad_expand": PipeType.V,
     # "move" is handled specially via get_move_pipe()
 }
 
@@ -239,4 +240,5 @@ _OP_TILE_ACCESS: dict[str, TileAccessPattern] = {
     "ub_copy": TileAccessPattern([1], [0]),
     "full":    TileAccessPattern([],  [0]),
     "fillpad": TileAccessPattern([1], [0]),
+    "fillpad_expand": TileAccessPattern([1], [0]),
 }
