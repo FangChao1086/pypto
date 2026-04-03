@@ -65,6 +65,10 @@ def _normalize_expr(
     Raises:
         TypeError: If value is not int, float, or ir.Expr
     """
+    from pypto.language.typing.tile import Tile
+    if isinstance(value, Tile):
+        return value.unwrap()
+    
     if isinstance(value, _ir.Expr):
         return value
 
