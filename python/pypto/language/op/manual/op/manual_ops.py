@@ -224,10 +224,14 @@ def make_tile(
 # Memory operations
 # ---------------------------------------------------------------------------
 
-def _check_nd_load_bounds(out: "Tile", tensor: "Tensor") -> None:
+def _check_nd_load_bounds(out: "Tile", tensor: "Tensor", tile_dims: "list[int] | None" = None) -> None:
     """Validate that tile dims do not exceed tensor dims for ND loads.
 
-    Compares static (ConstInt) shape dimensions between the tile and tensor.
+    Compares static (ConstInt) shape dimensions between the tile and the
+    corresponding tensor dimensions.  For an M-D tile on an N-D tensor (N >= M),
+    tile dimensions are aligned with the **last M** tensor dimensions by default,
+    or with the dimensions specified by ``tile_dims``.
+
     Raises ValueError if a tile dimension exceeds the corresponding tensor
     dimension, which would cause an out-of-bounds partition_view.
     """
@@ -237,13 +241,19 @@ def _check_nd_load_bounds(out: "Tile", tensor: "Tensor") -> None:
     tensor_shape = getattr(tensor_type, "shape", None)
     if tile_shape is None or tensor_shape is None:
         return
-    for d, (t_dim, s_dim) in enumerate(zip(tile_shape, tensor_shape)):
-        t_val = getattr(t_dim, "value", None)
-        s_val = getattr(s_dim, "value", None)
+    tile_ndim = len(tile_shape)
+    tensor_ndim = len(tensor_shape)
+    if tile_dims is None:
+        tile_dims = list(range(tensor_ndim - tile_ndim, tensor_ndim))
+    for tile_d, tensor_d in enumerate(tile_dims):
+        if tensor_d >= tensor_ndim or tile_d >= tile_ndim:
+            continue
+        t_val = getattr(tile_shape[tile_d], "value", None)
+        s_val = getattr(tensor_shape[tensor_d], "value", None)
         if t_val is not None and s_val is not None and t_val > s_val:
             raise ValueError(
-                f"manual.load: tile dimension {d} ({t_val}) exceeds tensor "
-                f"dimension ({s_val}). If the tensor needs transposing, "
+                f"manual.load: tile dimension {tile_d} ({t_val}) exceeds tensor "
+                f"dimension {tensor_d} ({s_val}). If the tensor needs transposing, "
                 f'use layout="dn".'
             )
 
@@ -268,10 +278,9 @@ def load(
     kwargs: dict = {}
     if layout is not None:
         kwargs["layout"] = layout
-    shapes_tuple = _to_make_tuple(out.shape)
     out._expr = _ir_core.create_op_call(
         "manual.load",
-        [tensor.unwrap(), _to_make_tuple(offsets), shapes_tuple, out.unwrap()],
+        [tensor.unwrap(), _to_make_tuple(offsets), out.unwrap()],
         kwargs,
         _span(),
     )

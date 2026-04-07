@@ -24,6 +24,42 @@ from pypto.pypto_core.ir import Call, Expr, Span, ConstInt
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 
 
+def _compute_absolute_offsets(
+    tile_offsets: _ir_core.MakeTuple,
+    tile_shape: list,
+    tile_dims: list[int],
+    span: "Span",
+) -> _ir_core.MakeTuple:
+    """Convert tile-relative offsets to absolute offsets.
+
+    For each dimension i in tile_offsets:
+    - If i is in tile_dims: absolute_offset = tile_offset * tile_shape[tile_idx]
+    - Otherwise: absolute_offset = tile_offset (used directly)
+
+    Args:
+        tile_offsets: MakeTuple of per-dimension tile-relative offsets.
+        tile_shape: Tile shape dimensions (list of Expr).
+        tile_dims: Which tensor dimensions correspond to tile dimensions.
+        span: Source span for created expressions.
+
+    Returns:
+        MakeTuple of absolute offsets.
+    """
+    offsets = []
+    for i, tile_offset in enumerate(tile_offsets.elements):
+        if i in tile_dims:
+            tile_idx = tile_dims.index(i)
+            shape = tile_shape[tile_idx]
+            if isinstance(tile_offset, ConstInt) and isinstance(shape, ConstInt):
+                offset = ConstInt(tile_offset.value * shape.value, DataType.INT64, span)
+            else:
+                offset = _ir_core.Mul(tile_offset, shape, DataType.INT64, span)
+            offsets.append(offset)
+        else:
+            offsets.append(tile_offset)
+    return _ir_core.MakeTuple(offsets, span)
+
+
 def load(
     out: Expr,
     tensor: Expr,
@@ -45,13 +81,11 @@ def load(
     """
     actual_span = _get_span_or_capture(span)
     offsets_tuple = _to_make_tuple(offsets, actual_span)
-    tile_shape = out.type.shape
-    shapes_tuple = _ir_core.MakeTuple(list(tile_shape), actual_span)
     kwargs: dict = {}
     if layout is not None:
         kwargs["layout"] = layout
     return _ir_core.create_op_call(
-        "manual.load", [tensor, offsets_tuple, shapes_tuple, out], kwargs, actual_span
+        "manual.load", [tensor, offsets_tuple, out], kwargs, actual_span
     )
 
 
@@ -176,27 +210,16 @@ def load_tile(
     if tile_dims is None:
         tile_dims = list(range(tensor_ndim - tile_ndim, tensor_ndim))
 
-    offsets = []
-    for i, tile_offset in enumerate(tile_offsets.elements):
-        if i in tile_dims:
-            tile_idx = tile_dims.index(i)
-            shape = tile_shape[tile_idx]
-            if isinstance(tile_offset, ConstInt) and isinstance(shape, ConstInt):
-                offset = ConstInt(tile_offset.value * shape.value, DataType.INT64, actual_span)
-            else:
-                offset = _ir_core.Mul(tile_offset, shape, DataType.INT64, actual_span)
-            offsets.append(offset)
-        else:
-            offsets.append(tile_offset)
-    offsets_tuple = _ir_core.MakeTuple(offsets, actual_span)
-    shapes_tuple = _ir_core.MakeTuple(list(tile_shape), actual_span)
+    offsets_tuple = _compute_absolute_offsets(
+        tile_offsets, list(tile_shape), tile_dims, actual_span
+    )
     kwargs = {}
     if layout is not None:
         kwargs["layout"] = layout
     if tile_dims != list(range(tensor_ndim - tile_ndim, tensor_ndim)):
         kwargs["tile_dims"] = ",".join(str(d) for d in tile_dims)
     return _ir_core.create_op_call(
-        "manual.load", [tensor, offsets_tuple, shapes_tuple, out], kwargs, actual_span
+        "manual.load", [tensor, offsets_tuple, out], kwargs, actual_span
     )
 
 
@@ -236,19 +259,9 @@ def store_tile(
     if tile_dims is None:
         tile_dims = list(range(tensor_ndim - tile_ndim, tensor_ndim))
 
-    offsets = []
-    for i, tile_offset in enumerate(tile_offsets.elements):
-        if i in tile_dims:
-            tile_idx = tile_dims.index(i)
-            shape = tile_shape[tile_idx]
-            if isinstance(tile_offset, ConstInt) and isinstance(shape, ConstInt):
-                offset = ConstInt(tile_offset.value * shape.value, DataType.INT64, actual_span)
-            else:
-                offset = _ir_core.Mul(tile_offset, shape, DataType.INT64, actual_span)
-            offsets.append(offset)
-        else:
-            offsets.append(tile_offset)
-    offsets_tuple = _ir_core.MakeTuple(offsets, actual_span)
+    offsets_tuple = _compute_absolute_offsets(
+        tile_offsets, list(tile_shape), tile_dims, actual_span
+    )
 
     kwargs = {}
     if tile_dims != list(range(tensor_ndim - tile_ndim, tensor_ndim)):

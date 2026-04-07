@@ -200,8 +200,11 @@ class PTOCodegen : public CodegenBase {
   /** @brief Get tile valid_shape SSA pair from mapping. INTERNAL_CHECK if key absent. */
   std::pair<std::string, std::string> GetTileValidShape(const std::string tile) const;
 
-  /** @brief Check if tile is dynamic */
+  /** @brief Check if tile is dynamic (string-based, for backward compat) */
   [[nodiscard]] bool IsDynamicTileType(const std::string tile_type) const;
+
+  /** @brief Check if tile type has dynamic valid_shape (structured check). */
+  [[nodiscard]] static bool IsDynamicTile(const std::shared_ptr<const ir::TileType>& tile_type);
 
   /**
    * @brief Get raw pointer (%argN) for a tensor variable

@@ -55,6 +55,57 @@ using ir::Var;
 static const std::vector<std::string> kManualCmpModes = {"EQ", "NE", "LT", "LE", "GT", "GE"};
 
 // ============================================================================
+// Effective tile size helper
+// ============================================================================
+
+/// Get effective tile sizes for partition_view, respecting valid_shape.
+///
+/// Returns (row, col, is_dynamic).  When valid_shape carries static values
+/// that differ from the allocated shape, those values are used so that the
+/// partition_view requests the correct (possibly smaller) region.  When
+/// valid_shape has dynamic dimensions (Var or -1), is_dynamic is set and
+/// the caller must use the tile_valid_shapes_ mapping for SSA names.
+struct EffectiveTileSize {
+  int64_t row = 0;
+  int64_t col = 0;
+  bool is_dynamic = false;
+};
+
+static EffectiveTileSize GetEffectiveTileSize(
+    const std::shared_ptr<const ir::TileType>& tile_type) {
+  EffectiveTileSize result;
+
+  // Check for dynamic first (via structured check)
+  if (codegen::PTOCodegen::IsDynamicTile(tile_type)) {
+    result.is_dynamic = true;
+    return result;
+  }
+
+  // Try valid_shape from tile_view if available
+  if (tile_type->tile_view_.has_value()) {
+    const auto& vs = tile_type->tile_view_->valid_shape;
+    if (vs.size() >= 2) {
+      auto r = As<ir::ConstInt>(vs[0]);
+      auto c = As<ir::ConstInt>(vs[1]);
+      if (r && c && r->value_ > 0 && c->value_ > 0) {
+        result.row = r->value_;
+        result.col = c->value_;
+        return result;
+      }
+    }
+  }
+
+  // Fall back to allocated shape
+  result.row = As<ir::ConstInt>(tile_type->shape_[0])
+                   ? As<ir::ConstInt>(tile_type->shape_[0])->value_
+                   : 0;
+  result.col = As<ir::ConstInt>(tile_type->shape_[1])
+                   ? As<ir::ConstInt>(tile_type->shape_[1])->value_
+                   : 0;
+  return result;
+}
+
+// ============================================================================
 // tile_dims helpers
 // ============================================================================
 
@@ -547,17 +598,14 @@ static std::string MakeManualLoadCodegenPTO(const CallPtr& op, codegen::CodegenB
   auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
   INTERNAL_CHECK(offsets_tuple) << "manual.load: second argument must be a MakeTuple (offsets)";
 
-  auto shapes_tuple = As<ir::MakeTuple>(op->args_[2]);
-  INTERNAL_CHECK(shapes_tuple) << "manual.load: third argument must be a MakeTuple (shapes)";
-
-  auto tile_type = As<ir::TileType>(op->args_[3]->GetType());
-  INTERNAL_CHECK(tile_type) << "manual.load: fourth argument (out) must be a Tile";
+  auto tile_type = As<ir::TileType>(op->args_[2]->GetType());
+  INTERNAL_CHECK(tile_type) << "manual.load: third argument (out) must be a Tile";
 
   auto tensor_type = As<TensorType>(tensor->GetType());
   INTERNAL_CHECK(tensor_type) << "manual.load: tensor argument must have TensorType";
 
   std::string dtype_str   = codegen.GetTypeString(tensor_type->dtype_);
-  std::string tile_buf    = codegen.GetExprAsCode(op->args_[3]);
+  std::string tile_buf    = codegen.GetExprAsCode(op->args_[2]);
   std::string tile_buf_type = codegen.GetTileBufTypeStringFromTileType(tile_type);
 
   // Check for DN (column-major) layout
@@ -661,44 +709,18 @@ static std::string MakeManualLoadCodegenPTO(const CallPtr& op, codegen::CodegenB
     row_off = codegen.GetExprAsCode(offsets_tuple->elements_[tensor_ndim - 1]);
     col_off = codegen.GetExprAsCode(offsets_tuple->elements_[tensor_ndim - 2]);
   } else {
-    // Standard ND path
-    // For N-D tensor (N > 2), flatten the first N-1 dimensions into row offset
-    // row_offset = ((offset[0] * dim[1] + offset[1]) * dim[2] + ...) * dim[N-2] + offset[N-2]
-    // col_offset = offset[N-1]
-    
+    // Standard ND path — use the pre-existing N-D tensor_view and flatten to 2D.
+    // For 2D tensors, offsets are used directly.
+    // For N-D tensors (N > 2), flatten first N-1 dims into row, last dim as col.
+    view_for_partition = codegen.GetOrCreateTensorView(tensor);
+    tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
+
     if (tensor_ndim == 2) {
-      // 2D tensor: use offsets directly
+      // 2D tensor: set row_off/col_off directly
       row_off = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
       col_off = codegen.GetExprAsCode(offsets_tuple->elements_[1]);
-    } else {
-      // N-D tensor (N > 2): compute flattened row offset
-      // row_offset = offset[0]
-      // for i in 1..N-1: row_offset = row_offset * dim[i] + offset[i]
-      std::string flat_row_off = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
-      for (size_t i = 1; i < tensor_ndim - 1; ++i) {
-        std::string dim_i;
-        if (auto var_i = As<ir::Var>(tensor_type->shape_[i])) {
-          dim_i = codegen.GetVarName(var_i);
-        } else {
-          dim_i = codegen.GetIndexConstant(codegen.GetConstIntValue(tensor_type->shape_[i]));
-        }
-        std::string off_i = codegen.GetExprAsCode(offsets_tuple->elements_[i]);
-        std::string new_row_off = codegen.NewTemp();
-        std::ostringstream mul_line, add_line;
-        mul_line << new_row_off << " = arith.muli " << flat_row_off << ", " << dim_i << " : index";
-        codegen.Emit(mul_line.str());
-        std::string tmp = new_row_off;
-        new_row_off = codegen.NewTemp();
-        add_line << new_row_off << " = arith.addi " << tmp << ", " << off_i << " : index";
-        codegen.Emit(add_line.str());
-        flat_row_off = new_row_off;
-      }
-      row_off = flat_row_off;
-      col_off = codegen.GetExprAsCode(offsets_tuple->elements_[tensor_ndim - 1]);
-    }
-    
-      // Static bounds check for 2D tensors
-    if (tensor_ndim == 2) {
+
+      // Static bounds check
       for (size_t d = 0; d < 2; ++d) {
         auto tensor_dim = As<ir::ConstInt>(tensor_type->shape_[d]);
         auto tile_dim = As<ir::ConstInt>(tile_type->shape_[d]);
@@ -709,32 +731,31 @@ static std::string MakeManualLoadCodegenPTO(const CallPtr& op, codegen::CodegenB
               << "). If the tensor needs transposing, use layout=\"dn\".";
         }
       }
-      // For 2D tensor, use the original tensor view directly
-      view_for_partition = codegen.GetOrCreateTensorView(tensor);
-      tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
     } else {
-      // For N-D tensor (N > 2), create a flattened 2D tensor_view
-      // row_off = ((offset[0] * dim[1] + offset[1]) * dim[2] + ... + offset[N-2])
-      // This is the linear index into a [prod(dim[0..N-2])] array
-      // For 4D tensor [B, N, Sq, D], row_off = ((b_idx * N + n_idx) * Sq + sq_off)
-      // So the flattened row dimension should be B * N * Sq = prod(dim[0..N-2])
-      
+      // N-D tensor (N > 2): flatten first N-1 dims into row offset
+      std::string flat_row_off = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
+      for (size_t i = 1; i < tensor_ndim - 1; ++i) {
+        std::string off_i = codegen.GetExprAsCode(offsets_tuple->elements_[i]);
+        std::string new_row_off = codegen.NewTemp();
+        codegen.Emit(new_row_off + " = arith.muli " + flat_row_off + ", " + dims[i] + " : index");
+        std::string tmp = new_row_off;
+        new_row_off = codegen.NewTemp();
+        codegen.Emit(new_row_off + " = arith.addi " + tmp + ", " + off_i + " : index");
+        flat_row_off = new_row_off;
+      }
+      row_off = flat_row_off;
+      col_off = codegen.GetExprAsCode(offsets_tuple->elements_[tensor_ndim - 1]);
+
+      // Create flattened 2D tensor_view
       std::string raw_ptr = codegen.GetTensorPtr(tensor);
-      
-      // Compute flattened row dimension: prod(dim[0..N-2])
-      // For 4D tensor [B, N, Sq, D], this is B * N * Sq
       std::string flat_row_dim = dims[0];
       for (size_t i = 1; i < tensor_ndim - 1; ++i) {
         std::string new_dim = codegen.NewTemp();
         codegen.Emit(new_dim + " = arith.muli " + flat_row_dim + ", " + dims[i] + " : index");
         flat_row_dim = new_dim;
       }
-      
       std::string col_dim = dims[tensor_ndim - 1];
       std::string c1 = codegen.GetIndexConstant(1);
-      
-      // Create a 2D tensor_view with shape [flat_row_dim, col_dim]
-      // strides = [col_dim, 1] for row-major (ND) layout
       std::string nd_view = codegen.NewTemp();
       tensor_view_type = "!pto.tensor_view<?x?x" + dtype_str + ">";
       std::ostringstream tv_line;
@@ -747,12 +768,13 @@ static std::string MakeManualLoadCodegenPTO(const CallPtr& op, codegen::CodegenB
     }
   }
 
+  // Build 2D partition_view using row_off/col_off.
   std::string partition_view = codegen.NewTemp();
   std::string partition_type;
   std::ostringstream pv_line;
 
-  bool is_dynamic = codegen.IsDynamicTileType(tile_buf_type);
-  if (is_dynamic) {
+  auto eff = GetEffectiveTileSize(tile_type);
+  if (eff.is_dynamic) {
     // Dynamic tile: get partition_view sizes from tile→valid_shape mapping
     auto [cur_row, cur_col] = codegen.GetTileValidShape(tile_buf);
 
@@ -763,16 +785,13 @@ static std::string MakeManualLoadCodegenPTO(const CallPtr& op, codegen::CodegenB
             << " : " << tensor_view_type << " -> " << partition_type;
     codegen.Emit(pv_line.str());
   } else {
-    // Static tile: get partition_view sizes from tile shape constants
-    auto cur_row = codegen.GetConstIntValue(tile_type->shape_[0]);
-    auto cur_col = codegen.GetConstIntValue(tile_type->shape_[1]);
-
-    partition_type = "!pto.partition_tensor_view<" + std::to_string(cur_row) + "x" +
-                                 std::to_string(cur_col) + "x" + dtype_str + ">";
+    // Static tile: use effective size (valid_shape if set, else allocated shape)
+    partition_type = "!pto.partition_tensor_view<" + std::to_string(eff.row) + "x" +
+                                 std::to_string(eff.col) + "x" + dtype_str + ">";
     pv_line << partition_view << " = pto.partition_view " << view_for_partition
           << ", offsets = [" << row_off << ", " << col_off << "]"
-          << ", sizes = ["   << codegen.GetIndexConstant(cur_row)  << ", "
-          << codegen.GetIndexConstant(cur_col) << "]"
+          << ", sizes = ["   << codegen.GetIndexConstant(eff.row)  << ", "
+          << codegen.GetIndexConstant(eff.col) << "]"
           << " : " << tensor_view_type << " -> " << partition_type;
     codegen.Emit(pv_line.str());
   }
@@ -793,6 +812,10 @@ static std::string MakeManualLoadCodegenPTO(const CallPtr& op, codegen::CodegenB
 //   %pv = pto.partition_view %tensor_view, offsets=[...], sizes=[...] : T -> PTV
 //   (optional) pto.set_validshape %tile_buf, row, col : TileBufType
 //   pto.tstore ins(%tile_buf : TileBufType) outs(%pv : PTV)
+//
+// NOTE: DN (column-major) layout is NOT supported for store operations.
+// The hardware transposes data only during TLOAD (MTE2 pipe), not TSTORE.
+// The DSL API (plm.store / plm.store_tile) does not expose a layout parameter.
 // ============================================================================
 
 static std::string MakeManualStoreCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
@@ -851,24 +874,15 @@ static std::string MakeManualStoreCodegenPTO(const CallPtr& op, codegen::Codegen
     tensor_view = codegen.GetOrCreateTensorView(output_tensor);
     tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
   } else {
-    // Default N>2: flatten dims 0..N-2 into row offset
+    // N-D tensor (N > 2): flatten first N-1 dims into row offset
     std::string flat_row_off = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
     for (size_t i = 1; i < tensor_ndim - 1; ++i) {
-      std::string dim_i;
-      if (auto var_i = As<ir::Var>(tensor_type->shape_[i])) {
-        dim_i = codegen.GetVarName(var_i);
-      } else {
-        dim_i = codegen.GetIndexConstant(codegen.GetConstIntValue(tensor_type->shape_[i]));
-      }
       std::string off_i = codegen.GetExprAsCode(offsets_tuple->elements_[i]);
       std::string new_row_off = codegen.NewTemp();
-      std::ostringstream mul_line, add_line;
-      mul_line << new_row_off << " = arith.muli " << flat_row_off << ", " << dim_i << " : index";
-      codegen.Emit(mul_line.str());
+      codegen.Emit(new_row_off + " = arith.muli " + flat_row_off + ", " + dims[i] + " : index");
       std::string tmp = new_row_off;
       new_row_off = codegen.NewTemp();
-      add_line << new_row_off << " = arith.addi " << tmp << ", " << off_i << " : index";
-      codegen.Emit(add_line.str());
+      codegen.Emit(new_row_off + " = arith.addi " + tmp + ", " + off_i + " : index");
       flat_row_off = new_row_off;
     }
     row_off = flat_row_off;
@@ -899,8 +913,8 @@ static std::string MakeManualStoreCodegenPTO(const CallPtr& op, codegen::Codegen
   std::string partition_type;
   std::ostringstream pv_line;
 
-  bool is_dynamic = codegen.IsDynamicTileType(tile_buf_type);
-  if (is_dynamic) {
+  auto eff = GetEffectiveTileSize(tile_type);
+  if (eff.is_dynamic) {
     // Dynamic tile: get partition_view sizes from tile→valid_shape mapping
     auto [cur_row, cur_col] = codegen.GetTileValidShape(tile_buf);
 
@@ -911,16 +925,13 @@ static std::string MakeManualStoreCodegenPTO(const CallPtr& op, codegen::Codegen
             << " : " << tensor_view_type << " -> " << partition_type;
     codegen.Emit(pv_line.str());
   } else {
-    // Static tile: get partition_view sizes from tile shape constants
-    auto cur_row = codegen.GetConstIntValue(tile_type->shape_[0]);
-    auto cur_col = codegen.GetConstIntValue(tile_type->shape_[1]);
-
-    partition_type = "!pto.partition_tensor_view<" + std::to_string(cur_row) + "x" +
-                                 std::to_string(cur_col) + "x" + dtype_str + ">";
+    // Static tile: use effective size (valid_shape if set, else allocated shape)
+    partition_type = "!pto.partition_tensor_view<" + std::to_string(eff.row) + "x" +
+                                 std::to_string(eff.col) + "x" + dtype_str + ">";
     pv_line << partition_view << " = pto.partition_view " << tensor_view
           << ", offsets = [" << row_off << ", " << col_off << "]"
-          << ", sizes = ["   << codegen.GetIndexConstant(cur_row)  << ", "
-          << codegen.GetIndexConstant(cur_col) << "]"
+          << ", sizes = ["   << codegen.GetIndexConstant(eff.row)  << ", "
+          << codegen.GetIndexConstant(eff.col) << "]"
           << " : " << tensor_view_type << " -> " << partition_type;
     codegen.Emit(pv_line.str());
   }

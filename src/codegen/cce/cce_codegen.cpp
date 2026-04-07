@@ -1977,7 +1977,7 @@ class TensorAccessShapeCollector : public ir::IRVisitor {
     if (op_name == "block.load") {
       tensor_arg_idx = 0; shapes_arg_idx = 2; tile_arg_idx = 3;
     } else if (op_name == "manual.load") {
-      tensor_arg_idx = 0; shapes_arg_idx = 2; tile_arg_idx = 3;
+      tensor_arg_idx = 0; tile_arg_idx = 2;
     } else if (op_name == "block.store") {
       tensor_arg_idx = 3; shapes_arg_idx = 2; tile_arg_idx = 0;
     } else if (op_name == "manual.store") {

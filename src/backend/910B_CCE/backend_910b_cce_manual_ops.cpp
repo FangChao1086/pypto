@@ -137,12 +137,12 @@ static std::string ComputeManualOffset(codegen::CCECodegen& codegen, const std::
 }
 
 // ============================================================================
-// manual.load — args = [tensor, offsets, shapes, out_tile]
+// manual.load — args = [tensor, offsets, out_tile]
 // Emits: TASSIGN(tensor_global, ptr + offset); TLOAD(out_tile, tensor_global);
 // ============================================================================
 static std::string MakeManualLoadCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 4) << "manual.load requires 4 arguments: tensor, offsets, shapes, out_tile";
+  CHECK(op->args_.size() == 3) << "manual.load requires 3 arguments: tensor, offsets, out_tile";
 
   auto src_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[0]);
   CHECK(src_tensor_var_ptr != nullptr) << "manual.load source tensor must be a Var";
@@ -150,11 +150,8 @@ static std::string MakeManualLoadCodegenCCE(const ir::CallPtr& op, codegen::Code
   auto offsets_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[1]);
   CHECK(offsets_tuple != nullptr) << "manual.load second argument must be a tuple (offsets)";
 
-  auto shapes_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[2]);
-  CHECK(shapes_tuple != nullptr) << "manual.load third argument must be a tuple (shapes)";
-
-  auto out_tile = std::dynamic_pointer_cast<const ir::Var>(op->args_[3]);
-  CHECK(out_tile != nullptr) << "manual.load fourth argument (out) must be a Var";
+  auto out_tile = std::dynamic_pointer_cast<const ir::Var>(op->args_[2]);
+  CHECK(out_tile != nullptr) << "manual.load third argument (out) must be a Var";
 
   std::string src_tensor_var = codegen.GetVarName(src_tensor_var_ptr);
   auto src_tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(src_tensor_var_ptr->GetType());
@@ -162,7 +159,7 @@ static std::string MakeManualLoadCodegenCCE(const ir::CallPtr& op, codegen::Code
 
   std::string offset = ComputeManualOffset(codegen, src_tensor_var, offsets_tuple, src_tensor_type);
   std::string src_ptr = codegen.GetPointer(src_tensor_var);
-  std::string out_name = codegen.GetExprAsCode(op->args_[3]);
+  std::string out_name = codegen.GetExprAsCode(op->args_[2]);
 
   codegen.Emit("TASSIGN(" + src_tensor_var + ", " + src_ptr + " + " + offset + ");");
   codegen.Emit("TLOAD(" + out_name + ", " + src_tensor_var + ");");

@@ -92,28 +92,26 @@ static TypePtr DeduceManualFillPadType(const std::vector<ExprPtr>& args,
 // Op registration
 // ---------------------------------------------------------------------------
 
-// manual.load: (tensor, offsets, shapes, out) -> TileType (out's type)
+// manual.load: (tensor, offsets, out) -> TileType (out's type)
 REGISTER_OP("manual.load")
     .set_op_category("ManualOp")
     .set_description(
         "Manual load: copy data from a global tensor into a pre-allocated tile. "
-        "The output tile (last arg) defines the destination buffer; its type is returned.")
+        "The output tile (last arg) defines the destination buffer; its type is returned. "
+        "Partition view sizes are derived from the tile type's shape/valid_shape.")
     .add_argument("tensor", "Source tensor (TensorType)")
     .add_argument("offsets", "Offset tuple per dimension (MakeTuple)")
-    .add_argument("shapes", "Shape tuple per dimension (MakeTuple)")
     .add_argument("out", "Pre-allocated destination tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      CHECK(args.size() == 4) << "manual.load requires 4 arguments, got " << args.size();
+      CHECK(args.size() == 3) << "manual.load requires 3 arguments, got " << args.size();
       CHECK(As<TensorType>(args[0]->GetType()))
           << "manual.load: arg 0 must be TensorType";
       auto offsets = As<MakeTuple>(args[1]);
       CHECK(offsets) << "manual.load: arg 1 must be MakeTuple (offsets)";
-      auto shapes = As<MakeTuple>(args[2]);
-      CHECK(shapes) << "manual.load: arg 2 must be MakeTuple (shapes)";
-      CHECK(As<TileType>(args[3]->GetType()))
-          << "manual.load: arg 3 must be TileType";
-      return args[3]->GetType();
+      CHECK(As<TileType>(args[2]->GetType()))
+          << "manual.load: arg 2 must be TileType";
+      return args[2]->GetType();
     });
 
 // manual.store: (tile, offsets, output_tensor) -> TensorType

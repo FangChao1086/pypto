@@ -1091,6 +1091,18 @@ bool PTOCodegen::IsDynamicTileType(const std::string tile_type) const {
   return tile_type.find("v_row=?, v_col=?") != std::string::npos;
 }
 
+bool PTOCodegen::IsDynamicTile(const std::shared_ptr<const ir::TileType>& tile_type) {
+  if (!tile_type || !tile_type->tile_view_.has_value()) return false;
+  const auto& vs = tile_type->tile_view_->valid_shape;
+  for (const auto& dim : vs) {
+    if (As<ir::Var>(dim)) return true;
+    if (auto c = As<ir::ConstInt>(dim)) {
+      if (c->value_ == -1) return true;
+    }
+  }
+  return false;
+}
+
 // ========================================================================
 // Control flow helpers
 // ========================================================================
