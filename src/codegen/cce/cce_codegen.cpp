@@ -875,6 +875,13 @@ void CCECodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
         current_expr_value_ = "";
         if (tile_addresses_.count(resolved)) {
           tile_addresses_[var_name] = tile_addresses_[resolved];
+          // If the resolved name differs from var_name and is a declared
+          // prologue tile, emit a C++ reference alias so that user-created
+          // aliases (e.g., `first_qk = qk_vec_buf[0]`) are valid C++
+          // identifiers when used in TLOAD/TSTORE.
+          if (resolved != var_name) {
+            emitter_.EmitLine("auto& " + var_name + " = " + resolved + ";");
+          }
         }
       }
       current_target_var_ = "";

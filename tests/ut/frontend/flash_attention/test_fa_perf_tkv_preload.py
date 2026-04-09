@@ -21,7 +21,7 @@ import torch
 import torch_npu
 import pypto.frontend as fe
 import pypto.language as pl
-import pypto.language.manual as plm
+import pypto.language.op.manual as plm
 
 # ================================================================
 #  Configuration — change QK_PRELOAD to tune pre-compute depth
@@ -166,7 +166,7 @@ def alloc_cube_buffer():
 # Access pattern: buf[q_idx * STRIDE + ri]  instead of buf[q_idx][ri]
 import tempfile as _tf, importlib.util as _ilu, os as _os
 def _gen_alloc_vec_state():
-    lines = ["import pypto.language as pl", "import pypto.language.manual as plm", ""]
+    lines = ["import pypto.language as pl", "import pypto.language.op.manual as plm", ""]
     lines.append("def alloc_vec_state():")
 
     def _flat_tuple(names):
@@ -370,23 +370,38 @@ def compute_pv(ctx, state, const_info):
 
 @pl.inline
 def softmax_body(ctx, row_off):
-    """Softmax body with ri loop. Double-buffered qk_vec & p_f16 for pipeline overlap."""
+    """Softmax body with ri loop. Software-pipelined MTE2 loads + double-buffered qk_vec & p_f16.
+    Opt 1: Removed barrier between muls(gmax_update) and row_expand_sub (independent buffers).
+    Opt 2: Prologue starts first MTE2 load; each iteration prefetches next tile during V compute."""
     p_fifo_slot = ctx.task_id % FIFO_SIZE
     q_idx = ctx.q_count % 2
-    for ri in pl.range(0, TS_HALF // SOFTMAX_ROWS):
+    N_RI = TS_HALF // SOFTMAX_ROWS  # 16
+    # Software-pipeline prologue: start loading first qk_vec tile (buf[0])
+    prologue_qk = qk_vec_buf[0]
+    pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE2,
+                       event_id=vec_evids_01[0])
+    plm.load(prologue_qk, qk_buf,
+             [ctx.core_id * FIFO_SIZE * TS + p_fifo_slot * TS + row_off, 0])
+    for ri in pl.range(0, N_RI):
         row_start = row_off + ri * SOFTMAX_ROWS
         buf_idx = ri % 2
+        next_buf_idx = (ri + 1) % 2
         global_max_rm_cur = global_max_rm_buf[q_idx * VEC_ROW_BLOCKS + ri]
         global_sum_rm_cur = global_sum_rm_buf[q_idx * VEC_ROW_BLOCKS + ri]
         exp_corr_cur = exp_corr_rm_fifo[p_fifo_slot * VEC_ROW_BLOCKS + ri]
         qk_vec = qk_vec_buf[buf_idx]
         p_f16 = p_f16_buf[buf_idx]
-        # Backward sync: MTE2 waits for V to release qk_vec[buf_idx] from 2 iters ago
-        pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE2,
-                           event_id=vec_evids_01[buf_idx])
-        plm.load(qk_vec, qk_buf, [ctx.core_id * FIFO_SIZE * TS + p_fifo_slot * TS + row_start, 0])
+        next_qk_vec = qk_vec_buf[next_buf_idx]
+        # Wait for current tile's MTE2 load to complete
         pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
         pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
+        # Prefetch next tile (MTE2 runs in parallel with V compute below)
+        if ri < N_RI - 1:
+            pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE2,
+                               event_id=vec_evids_01[next_buf_idx])
+            plm.load(next_qk_vec, qk_buf,
+                     [ctx.core_id * FIFO_SIZE * TS + p_fifo_slot * TS +
+                      row_off + (ri + 1) * SOFTMAX_ROWS, 0])
         # Backward sync: V waits for MTE3 to release p_f16[buf_idx] from 2 iters ago
         pl.system.sync_dst(set_pipe=pl.PipeType.MTE3, wait_pipe=pl.PipeType.V,
                            event_id=vec_evids_01[buf_idx])
@@ -410,7 +425,6 @@ def softmax_body(ctx, row_off):
             plm.sub(exp_corr_cur, global_max_rm_cur, reduce_dst_rm)
             pl.system.bar_v()
             plm.muls(global_max_rm_cur, reduce_dst_rm, 1.0)
-            pl.system.bar_v()
             plm.row_expand_sub(tmp_vec, qk_vec, reduce_dst)
             plm.muls(exp_corr_cur, exp_corr_cur, SCALE)
             plm.muls(tmp_vec, tmp_vec, SCALE)
