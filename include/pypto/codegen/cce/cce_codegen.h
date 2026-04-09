@@ -395,8 +395,12 @@ class CCECodegen : public CodegenBase {
   int loop_depth_ = 0;                        ///< Current for-loop nesting depth (0 = not in loop)
   std::vector<std::string> loop_hoisted_decls_;  ///< Lines to hoist before outermost loop
 
-  // EventId array deduplication: maps (val0, val1) → EventId variable name
+  // EventId array deduplication: maps (val0, val1) → EventId variable name (2-way)
   std::map<std::pair<int64_t, int64_t>, std::string> event_id_decls_;
+  // EventId N-way array deduplication: maps "index_expr:v0,v1,v2,..." → EventId variable name
+  std::map<std::string, std::string> event_id_decls_nway_;
+  std::set<std::string> event_id_names_used_;  // track used names to avoid redefinition
+  int event_id_nway_counter_ = 0;
 
   // Tile array deduplication: maps "tile0,tile1" → shared Tile array name
   std::map<std::string, std::string> tile_array_decls_;

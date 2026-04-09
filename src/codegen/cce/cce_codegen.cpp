@@ -682,6 +682,9 @@ void CCECodegen::VisitStmt_(const ir::SectionStmtPtr& op) {
     context_.RestoreSnapshot();
   }
   event_id_decls_.clear();
+  event_id_decls_nway_.clear();
+  event_id_names_used_.clear();
+  event_id_nway_counter_ = 0;
   tile_array_decls_.clear();
   tile_array_counter_ = 0;
   // Note: keep tile_addresses_ and emitted_tile_types_ — they contain prologue data
@@ -975,8 +978,8 @@ void CCECodegen::VisitStmt_(const ir::IfStmtPtr& op) {
   INTERNAL_CHECK(op->condition_ != nullptr) << "Internal error: IfStmt has null condition";
   INTERNAL_CHECK(op->then_body_ != nullptr) << "Internal error: IfStmt has null then_body";
 
-  // ---------- Optimization: binary select → array/indexing ----------
-  // Detect pattern: if (x == 0) { yield A } else { yield B }
+  // ---------- Optimization: N-way select → array/indexing ----------
+  // Detect pattern: if (x == 0) { yield A } else { if (x == 1) { yield B } else { ... } }
   // For TileType: emit constexpr array + TASSIGN (hoisted outside loops)
   // For ScalarType with ConstInt yields: emit EventId array (hoisted outside loops)
   if (op->return_vars_.size() >= 1 && op->else_body_.has_value()) {
@@ -1030,10 +1033,51 @@ void CCECodegen::VisitStmt_(const ir::IfStmtPtr& op) {
     };
 
     auto then_yields = extract_yield_names(op->then_body_);
-    auto else_yields = extract_yield_names(*op->else_body_);
+    // --- N-way nested if-else collection ---
+    // Walk the nested else chain: if(x==0){A} else{if(x==1){B} else{if(x==2){C}...}}
+    // Collect all yield vectors into all_cases[0]=A, all_cases[1]=B, ...
+    std::vector<std::vector<std::string>> all_cases;
+    bool nway_valid = !then_yields.empty() && then_yields.size() == op->return_vars_.size();
+    if (nway_valid) {
+      all_cases.push_back(then_yields);
+      // Walk else branches
+      std::optional<ir::StmtPtr> cur_else = op->else_body_;
+      while (cur_else.has_value()) {
+        ir::IfStmtPtr nested_if;
+        if (auto direct_if = ir::As<ir::IfStmt>(*cur_else)) {
+          nested_if = direct_if;
+        } else if (auto seq = ir::As<ir::SeqStmts>(*cur_else)) {
+          // Look for IfStmt among statements (else body may contain extra stmts)
+          for (const auto& stmt : seq->stmts_) {
+            if (auto nif = ir::As<ir::IfStmt>(stmt)) {
+              nested_if = nif;
+              break;
+            }
+          }
+        }
+        if (nested_if) {
+          // Verify condition is (same_expr == next_int)
+          auto eq = ir::As<ir::Eq>(nested_if->condition_);
+          auto rhs_c = eq ? ir::As<ir::ConstInt>(eq->right_) : nullptr;
+          if (!rhs_c || rhs_c->value_ != static_cast<int64_t>(all_cases.size())) {
+            nway_valid = false; break;
+          }
+          auto ys = extract_yield_names(nested_if->then_body_);
+          if (ys.size() != op->return_vars_.size()) { nway_valid = false; break; }
+          all_cases.push_back(ys);
+          cur_else = nested_if->else_body_;
+        } else {
+          // Final else (default / last case)
+          auto ys = extract_yield_names(*cur_else);
+          if (ys.size() == op->return_vars_.size()) {
+            all_cases.push_back(ys);
+          }
+          break;
+        }
+      }
+    }
 
-    bool can_optimize = (then_yields.size() == op->return_vars_.size() &&
-                         else_yields.size() == op->return_vars_.size());
+    bool can_optimize = nway_valid && all_cases.size() >= 2;
 
     if (can_optimize) {
       // Extract the LHS of condition (x == 0) to use as array index
@@ -1055,30 +1099,35 @@ void CCECodegen::VisitStmt_(const ir::IfStmtPtr& op) {
       if (can_optimize) {
         for (size_t i = 0; i < op->return_vars_.size(); ++i) {
           const auto& return_var = op->return_vars_[i];
-          const std::string& then_val = then_yields[i];
-          const std::string& else_val = else_yields[i];
           auto return_type = return_var->GetType();
+
+          // Collect all yield values for this return var across all cases
+          std::vector<std::string> vals;
+          for (auto& c : all_cases) vals.push_back(c[i]);
+
           if (auto tile_type = ir::As<ir::TileType>(return_type)) {
             // Tile array: group source tiles into an array, index directly.
-            // No _tidx temporary tile, no per-iteration TASSIGN.
-            // Prologue tiles already have TASSIGN'd addresses.
-            bool then_has_addr = tile_addresses_.count(then_val);
-            bool else_has_addr = tile_addresses_.count(else_val);
-            if (!then_has_addr || !else_has_addr) {
+            bool all_have_addr = true;
+            for (auto& v : vals) {
+              if (!tile_addresses_.count(v)) { all_have_addr = false; break; }
+            }
+            if (!all_have_addr) {
               can_optimize = false;
               break;
             }
 
-            // Deduplicate Tile arrays by (tile0, tile1) pair
-            std::string dedup_key = then_val + "," + else_val;
+            // Deduplicate Tile arrays by all element names AND index expression
+            std::string dedup_key = index_expr + ":";
+            for (auto& v : vals) { dedup_key += v + ","; }
             std::string arr_name;
             if (tile_array_decls_.count(dedup_key)) {
               arr_name = tile_array_decls_[dedup_key];
             } else {
-              // Derive array name from source tile pair: strip trailing "_N" suffix
-              // e.g., (q_mat_buf_0_0, q_mat_buf_0_1) → "q_mat_buf_0"
-              auto pos = then_val.rfind('_');
-              arr_name = (pos != std::string::npos) ? then_val.substr(0, pos) : then_val;
+              // Derive array name from first tile: strip trailing "_N" suffix
+              auto pos = vals[0].rfind('_');
+              arr_name = (pos != std::string::npos) ? vals[0].substr(0, pos) : vals[0];
+              // Append _arr suffix to avoid collision with original tile variable names
+              arr_name += "_arr";
               // Ensure uniqueness if name collision
               if (tile_array_decls_.count(arr_name + "_dedup")) {
                 arr_name += "_" + std::to_string(tile_array_counter_++);
@@ -1089,8 +1138,13 @@ void CCECodegen::VisitStmt_(const ir::IfStmtPtr& op) {
               int64_t rows = shape_dims.size() >= 1 ? shape_dims[0] : 1;
               int64_t cols = shape_dims.size() >= 2 ? shape_dims[1] : 1;
               std::string tile_type_str = type_converter_.ConvertTileType(tile_type, rows, cols);
+              std::ostringstream arr_elems;
+              for (size_t j = 0; j < vals.size(); ++j) {
+                if (j > 0) arr_elems << ", ";
+                arr_elems << vals[j];
+              }
               std::string arr_decl =
-                  tile_type_str + " " + arr_name + "[] = {" + then_val + ", " + else_val + "};";
+                  tile_type_str + " " + arr_name + "[] = {" + arr_elems.str() + "};";
               if (loop_depth_ > 0) {
                 loop_hoisted_decls_.push_back(arr_decl);
               } else {
@@ -1098,32 +1152,45 @@ void CCECodegen::VisitStmt_(const ir::IfStmtPtr& op) {
               }
             }
 
-            // Register return var directly as Tile array access — no re-registration warning
+            // Register return var directly as Tile array access
             std::string access_expr = arr_name + "[" + index_expr + "]";
             context_.RegisterVar(return_var, access_expr);
 
           } else if (ir::As<ir::ScalarType>(return_type)) {
             // Scalar with ConstInt yields: emit EventId array
-            // Check that both yields are numeric constants
-            bool then_is_num = !then_val.empty() && (std::isdigit(then_val[0]) || then_val[0] == '-');
-            bool else_is_num = !else_val.empty() && (std::isdigit(else_val[0]) || else_val[0] == '-');
-            if (!then_is_num || !else_is_num) {
+            bool all_num = true;
+            for (auto& v : vals) {
+              if (v.empty() || (!std::isdigit(v[0]) && v[0] != '-')) { all_num = false; break; }
+            }
+            if (!all_num) {
               can_optimize = false;
               break;
             }
-            int64_t v0 = std::stoll(then_val);
-            int64_t v1 = std::stoll(else_val);
-            auto key = std::make_pair(v0, v1);
 
-            // Deduplicate EventId declarations by value pair
+            // Deduplicate EventId array by value combination AND index expression
+            // Different index expressions must not share the same array even if values match
+            std::string dedup_key = index_expr + ":";
+            for (auto& v : vals) { dedup_key += v + ","; }
             std::string eid_name;
-            if (event_id_decls_.count(key)) {
-              eid_name = event_id_decls_[key];
+            if (event_id_decls_nway_.count(dedup_key)) {
+              eid_name = event_id_decls_nway_[dedup_key];
             } else {
-              eid_name = "_eid_" + std::to_string(v0) + "_" + std::to_string(v1);
-              event_id_decls_[key] = eid_name;
+              eid_name = "_eid";
+              for (auto& v : vals) eid_name += "_" + v;
+              // Ensure unique name by appending counter if name already exists
+              std::string base_name = eid_name;
+              while (event_id_names_used_.count(eid_name)) {
+                eid_name = base_name + "_" + std::to_string(event_id_nway_counter_++);
+              }
+              event_id_names_used_.insert(eid_name);
+              event_id_decls_nway_[dedup_key] = eid_name;
+              std::ostringstream arr_elems;
+              for (size_t j = 0; j < vals.size(); ++j) {
+                if (j > 0) arr_elems << ", ";
+                arr_elems << "(event_t)" << vals[j];
+              }
               std::string decl_line =
-                  "const event_t " + eid_name + "[] = {(event_t)" + then_val + ", (event_t)" + else_val + "};";
+                  "const event_t " + eid_name + "[] = {" + arr_elems.str() + "};";
               if (loop_depth_ > 0) {
                 loop_hoisted_decls_.push_back(decl_line);
               } else {
@@ -2295,14 +2362,18 @@ void CCECodegen::GenerateGlobalTensorTypeDeclaration(
       }
       oss << "1, " << shape_dims[0];
     } else {
-      // ND (row-major) strides: stride[i] = product(shape[i+1..n-1])
+      // ND (row-major) strides: stride[i] = product(dims[i+1..n-1])
+      // When access_shape overrides Shape<> for sub-tile operations (e.g., l0c_store of [128,128]
+      // into a larger [12288,1024] tensor), use actual tensor dims for stride so the row spacing
+      // matches the real tensor layout, not the sub-tile size.
+      const auto& stride_source = (all_static && access_shape.has_value()) ? tensor_dims : shape_dims;
       for (size_t i = 0; i < target_dims - n; ++i) {
         oss << "1, ";
       }
       for (size_t i = 0; i < n; ++i) {
         int64_t stride = 1;
         for (size_t j = i + 1; j < n; ++j) {
-          stride *= shape_dims[j];
+          stride *= stride_source[j];
         }
         oss << stride;
         if (i < n - 1) oss << ", ";
